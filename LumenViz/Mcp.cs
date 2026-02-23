@@ -339,6 +339,31 @@ public class McpServer
                 "Shut down the MCP server process. Use this to stop the server " +
                 "before rebuilding. The MCP client will need to restart it.",
                 Props()),
+
+            // ── Selection ──────────────────────────────────────────────
+            ToolDef("get_selection",
+                "Get the currently selected node indices and labels in a window. " +
+                "Returns an array of {index, label, community} objects.",
+                PropsReq(("window", "string", "Window ID"))),
+
+            ToolDef("get_selection_summary",
+                "Quickly check which windows have any nodes selected. " +
+                "Returns a list of window IDs with their selection counts.",
+                Props()),
+
+            // ── Coarsening levels ──────────────────────────────────────
+            ToolDef("get_coarse_levels",
+                "Get info about all coarsening levels for a window's graph. " +
+                "Returns node/edge counts per level. Level 0 = finest (original).",
+                PropsReq(("window", "string", "Window ID"))),
+
+            ToolDef("set_coarse_level",
+                "Navigate to a specific coarsening level in a window. " +
+                "Level 0 = finest (original graph), higher = coarser. " +
+                "Triggers smooth animated transition.",
+                Props(
+                    ("window", "string", "Window ID", true),
+                    ("level", "string", "Target level (0 = finest)", true))),
         };
     }
 
@@ -400,6 +425,14 @@ public class McpServer
 
                 // ── Process ────────────────────────────────────────────
                 "exit_process" => ExitProcess(),
+
+                // ── Selection ──────────────────────────────────────────
+                "get_selection" => GetSelection(args),
+                "get_selection_summary" => GetSelectionSummary(),
+
+                // ── Coarsening levels ──────────────────────────────────
+                "get_coarse_levels" => GetCoarseLevels(args),
+                "set_coarse_level" => SetCoarseLevel(args),
 
                 _ => throw new InvalidOperationException(
                     $"Unknown tool: {toolName}"),
@@ -471,6 +504,7 @@ public class McpServer
                     ["width"] = win.ClientSize.Width,
                     ["height"] = win.ClientSize.Height,
                     ["has_graph"] = win.GraphView.GetGraph() != null,
+                    ["selected"] = win.GraphView.Selection.Count,
                 });
             }
             return new JsonObject { ["windows"] = list }.ToJsonString();
@@ -497,6 +531,14 @@ public class McpServer
                 info["graph_nodes"] = graph.NodeCount;
                 info["graph_edges"] = graph.EdgeCount;
                 info["graph_communities"] = CountCommunities(graph);
+                info["selected_nodes"] = win.GraphView.Selection.Count;
+
+                var hierarchy = win.GraphView.GetHierarchy();
+                if (hierarchy != null)
+                {
+                    info["coarsening_levels"] = hierarchy.LevelCount;
+                    info["current_level"] = win.GraphView.CurrentLevel;
+                }
             }
             return info.ToJsonString();
         });
@@ -611,6 +653,104 @@ public class McpServer
     }
 
     // -----------------------------------------------------------------------
+    // Selection tools
+    // -----------------------------------------------------------------------
+
+    private string GetSelection(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        return InvokeOnUI(() =>
+        {
+            var graph = win.GraphView.GetGraph();
+            if (graph == null) return "No graph loaded";
+
+            var selection = win.GraphView.Selection;
+            var nodes = new JsonArray();
+            foreach (int i in selection)
+            {
+                if (i >= graph.NodeCount) continue;
+                nodes.Add(new JsonObject
+                {
+                    ["index"] = i,
+                    ["label"] = graph.Labels[i],
+                    ["community"] = graph.Community[i],
+                });
+            }
+            return new JsonObject
+            {
+                ["window"] = win.WindowId,
+                ["count"] = nodes.Count,
+                ["nodes"] = nodes,
+            }.ToJsonString();
+        });
+    }
+
+    private string GetSelectionSummary()
+    {
+        return InvokeOnUI(() =>
+        {
+            var list = new JsonArray();
+            foreach (var (id, win) in _windows)
+            {
+                int count = win.GraphView.Selection.Count;
+                list.Add(new JsonObject
+                {
+                    ["window"] = id,
+                    ["selected"] = count,
+                    ["has_selection"] = count > 0,
+                });
+            }
+            return new JsonObject { ["windows"] = list }.ToJsonString();
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Coarsening level tools
+    // -----------------------------------------------------------------------
+
+    private string GetCoarseLevels(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        return InvokeOnUI(() =>
+        {
+            var hierarchy = win.GraphView.GetHierarchy();
+            if (hierarchy == null) return "No coarsening hierarchy available";
+
+            var levels = new JsonArray();
+            for (int i = 0; i < hierarchy.LevelCount; i++)
+            {
+                var g = hierarchy.Graphs[i];
+                levels.Add(new JsonObject
+                {
+                    ["level"] = i,
+                    ["nodes"] = g.NodeCount,
+                    ["edges"] = g.EdgeCount,
+                    ["is_current"] = (i == win.GraphView.CurrentLevel),
+                });
+            }
+            return new JsonObject
+            {
+                ["window"] = win.WindowId,
+                ["current_level"] = win.GraphView.CurrentLevel,
+                ["level_count"] = hierarchy.LevelCount,
+                ["levels"] = levels,
+            }.ToJsonString();
+        });
+    }
+
+    private string SetCoarseLevel(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        int level = int.Parse(Arg(args, "level"));
+        return InvokeOnUI(() =>
+        {
+            if (win.GraphView.SetLevel(level))
+                return $"Navigating to level {level}";
+            return $"Cannot navigate to level {level} — out of range or no hierarchy";
+        });
+    }
+
+    // -----------------------------------------------------------------------
     // Process control
     // -----------------------------------------------------------------------
 
@@ -639,19 +779,24 @@ public class McpServer
         var graph = MatrixMarketReader.ReadFile(path);
         graph.DetectCommunities();
 
-        RunLayout(graph, iterations, gravity, layoutMode);
+        var hierarchy = RunLayout(graph, iterations, gravity, layoutMode);
 
         InvokeOnUI(() =>
         {
-            win.GraphView.SetGraph(graph);
+            if (hierarchy != null)
+                win.GraphView.SetGraphWithHierarchy(graph, hierarchy);
+            else
+                win.GraphView.SetGraph(graph);
+
             var c = CountCommunities(graph);
             win.SetStatus(
                 $"◇  {graph.Title}  —  {graph.NodeCount} nodes, " +
-                $"{graph.EdgeCount} edges, {c} communities");
+                $"{graph.EdgeCount} edges, {c} communities" +
+                (hierarchy != null ? $", {hierarchy.LevelCount} levels" : ""));
         });
 
         var communities = CountCommunities(graph);
-        return new JsonObject
+        var result = new JsonObject
         {
             ["window"] = win.WindowId,
             ["title"] = graph.Title,
@@ -659,7 +804,10 @@ public class McpServer
             ["edges"] = graph.EdgeCount,
             ["communities"] = communities,
             ["status"] = "loaded and displayed",
-        }.ToJsonString();
+        };
+        if (hierarchy != null)
+            result["coarsening_levels"] = hierarchy.LevelCount;
+        return result.ToJsonString();
     }
 
     private string GetGraphInfo(JsonNode? args)
@@ -687,10 +835,16 @@ public class McpServer
             var graph = win.GraphView.GetGraph();
             if (graph == null) return "No graph loaded";
 
-            RunLayout(graph, iterations, 0.05, layoutMode);
-            win.GraphView.AutoFit();
-            win.GraphView.Invalidate();
-            return "Layout recomputed";
+            var hierarchy = RunLayout(graph, iterations, 0.05, layoutMode);
+            if (hierarchy != null)
+                win.GraphView.SetGraphWithHierarchy(graph, hierarchy);
+            else
+            {
+                win.GraphView.AutoFit();
+                win.GraphView.Invalidate();
+            }
+            return "Layout recomputed" +
+                (hierarchy != null ? $" ({hierarchy.LevelCount} levels)" : "");
         });
     }
 
@@ -699,8 +853,9 @@ public class McpServer
     /// "auto": multi-level for n>200, flat otherwise.
     /// "multilevel": always multi-level.
     /// "flat": always flat FR.
+    /// Returns the coarsening hierarchy if multi-level was used, null otherwise.
     /// </summary>
-    private static void RunLayout(GraphModel graph, int iterations, double gravity, string mode)
+    private static CoarseningHierarchy? RunLayout(GraphModel graph, int iterations, double gravity, string mode)
     {
         bool useMultiLevel = mode switch
         {
@@ -720,6 +875,7 @@ public class McpServer
                 RefineIterations = Math.Min(iterations, 50),
             };
             ml.Run();
+            return ml.Hierarchy;
         }
         else
         {
@@ -731,6 +887,7 @@ public class McpServer
                 Gravity = gravity,
             };
             layout.Run();
+            return null;
         }
     }
 

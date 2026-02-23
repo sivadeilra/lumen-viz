@@ -32,6 +32,9 @@ public sealed class MultiLevelLayout
     /// <summary>Stop coarsening when node count falls below this (default 50).</summary>
     public int MinCoarseSize { get; set; } = 50;
 
+    /// <summary>The built coarsening hierarchy (populated after Run()).</summary>
+    public CoarseningHierarchy? Hierarchy { get; private set; }
+
     public MultiLevelLayout(GraphModel graph)
     {
         _graph = graph;
@@ -45,6 +48,7 @@ public sealed class MultiLevelLayout
         if (n <= MinCoarseSize * 2)
         {
             RunFlat(_graph, CoarseIterations, randomize: true);
+            Hierarchy = null;
             return;
         }
 
@@ -55,12 +59,16 @@ public sealed class MultiLevelLayout
         {
             // Couldn't coarsen meaningfully — fall back to flat FR
             RunFlat(_graph, CoarseIterations, randomize: true);
+            Hierarchy = null;
             return;
         }
 
         // Phase 2: Layout the coarsest graph
         var coarsest = levels[^1].Graph;
         RunFlat(coarsest, CoarseIterations, randomize: true);
+
+        // Detect communities on coarsest graph for coloring
+        coarsest.DetectCommunities();
 
         // Phase 3: Uncoarsen with refinement (coarsest → finest)
         for (int i = levels.Count - 1; i >= 0; i--)
@@ -73,9 +81,20 @@ public sealed class MultiLevelLayout
             // Place fine nodes at their coarse parent's position + jitter
             PlaceFromCoarse(fineGraph, coarseGraph, level.FineToCoarse);
 
+            // Propagate community coloring from coarse to fine
+            for (int fi = 0; fi < fineGraph.NodeCount; fi++)
+                fineGraph.Community[fi] = coarseGraph.Community[level.FineToCoarse[fi]];
+
             // Refine — don't randomize, the placement from coarser level is already good
             RunFlat(fineGraph, RefineIterations, randomize: false);
+
+            // Detect communities at this level too (for independent viewing)
+            if (i > 0)
+                levels[i - 1].Graph.DetectCommunities();
         }
+
+        // Store the hierarchy for visualization
+        Hierarchy = new CoarseningHierarchy(_graph, levels);
     }
 
     /// <summary>

@@ -43,6 +43,10 @@ public class VizWindow : Form
         // ── Graph view (fills the window) ───────────────────────────────
         _graphView = new GraphView { Dock = DockStyle.Fill };
 
+        // Wire level-change events so we update the status bar
+        _graphView.LevelChanged += OnLevelChanged;
+        _graphView.SelectionChanged += OnSelectionChanged;
+
         // ── Status bar ──────────────────────────────────────────────────
         _statusBar = new StatusStrip();
         _statusLabel = new ToolStripStatusLabel($"◇  {id}  —  Ready");
@@ -67,6 +71,50 @@ public class VizWindow : Form
     }
 
     public void SetStatus(string text) => _statusLabel.Text = text;
+
+    /// <summary>Update status bar to reflect current graph/level/selection state.</summary>
+    private void UpdateStatusFromGraph()
+    {
+        var graph = _graphView.GetGraph();
+        if (graph == null) return;
+
+        string status = $"◇  {graph.Title}  —  {graph.NodeCount}n, {graph.EdgeCount}e";
+
+        var hierarchy = _graphView.GetHierarchy();
+        if (hierarchy != null && hierarchy.LevelCount > 1)
+        {
+            int lvl = _graphView.CurrentLevel;
+            status += $"  |  Level {lvl}/{hierarchy.LevelCount - 1}";
+            if (lvl == 0) status += " (finest)";
+            else if (lvl == hierarchy.LevelCount - 1) status += " (coarsest)";
+        }
+
+        if (_graphView.Selection.Count > 0)
+            status += $"  |  {_graphView.Selection.Count} selected";
+
+        _statusLabel.Text = status;
+    }
+
+    private void OnLevelChanged()
+    {
+        UpdateStatusFromGraph();
+        EnqueueEvent(new JsonObject
+        {
+            ["type"] = "level_changed",
+            ["level"] = _graphView.CurrentLevel,
+            ["level_count"] = _graphView.LevelCount,
+        });
+    }
+
+    private void OnSelectionChanged()
+    {
+        UpdateStatusFromGraph();
+        EnqueueEvent(new JsonObject
+        {
+            ["type"] = "selection_changed",
+            ["count"] = _graphView.Selection.Count,
+        });
+    }
 
     /// <summary>
     /// Drain all pending interaction events. Returns them and clears the queue.
@@ -94,7 +142,10 @@ public class VizWindow : Form
 
     private void OnGraphClick(object? sender, MouseEventArgs e)
     {
-        int nodeIdx = HitTestNode(e.Location);
+        // Selection is handled by GraphView itself now.
+        // Only track interaction events for non-selection clicks (right/middle).
+        if (e.Button == MouseButtons.Left) return;
+
         var ev = new JsonObject
         {
             ["type"] = "click",
@@ -102,36 +153,27 @@ public class VizWindow : Form
             ["x"] = e.X,
             ["y"] = e.Y,
         };
-        if (nodeIdx >= 0)
-        {
-            var graph = _graphView.GetGraph()!;
-            ev["node_index"] = nodeIdx;
-            ev["node_label"] = graph.Labels[nodeIdx];
-            ev["node_community"] = graph.Community[nodeIdx];
-        }
         EnqueueEvent(ev);
     }
 
     private void OnGraphDoubleClick(object? sender, MouseEventArgs e)
     {
-        int nodeIdx = HitTestNode(e.Location);
         var ev = new JsonObject
         {
             ["type"] = "double_click",
             ["x"] = e.X,
             ["y"] = e.Y,
         };
-        if (nodeIdx >= 0)
-        {
-            var graph = _graphView.GetGraph()!;
-            ev["node_index"] = nodeIdx;
-            ev["node_label"] = graph.Labels[nodeIdx];
-        }
         EnqueueEvent(ev);
     }
 
     private void OnWindowKeyDown(object? sender, KeyEventArgs e)
     {
+        // PgUp/PgDn/Home/End are handled by GraphView.OnKeyDown directly.
+        // Don't double-report those as interaction events.
+        if (e.KeyCode is Keys.PageUp or Keys.PageDown or Keys.Home or Keys.End)
+            return;
+
         EnqueueEvent(new JsonObject
         {
             ["type"] = "key_down",
@@ -157,37 +199,5 @@ public class VizWindow : Form
             ["type"] = "window_closed",
         });
         WindowClosed?.Invoke(_windowId);
-    }
-
-    // ── Node hit testing ────────────────────────────────────────────────
-
-    /// <summary>Returns node index, or -1 if no node hit.</summary>
-    private int HitTestNode(Point screenPoint)
-    {
-        var graph = _graphView.GetGraph();
-        if (graph == null) return -1;
-
-        float bestDist = float.MaxValue;
-        int bestNode = -1;
-
-        for (int i = 0; i < graph.NodeCount; i++)
-        {
-            var pt = _graphView.WorldToScreenNode(i);
-            float dx = screenPoint.X - pt.X;
-            float dy = screenPoint.Y - pt.Y;
-            float dist = dx * dx + dy * dy;
-
-            float radius = _graphView.NodeRadius +
-                Math.Min(graph.Degree[i] * 0.3f, 6f);
-            float hitRadius = radius + 4; // generous click target
-
-            if (dist < hitRadius * hitRadius && dist < bestDist)
-            {
-                bestDist = dist;
-                bestNode = i;
-            }
-        }
-
-        return bestNode;
     }
 }
