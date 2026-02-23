@@ -118,15 +118,25 @@ public class SkiaGraphView : Control
     private Rgba32[] _nodeColors = Array.Empty<Rgba32>();
     private Rgba32[] _edgeColors = Array.Empty<Rgba32>();
 
+    // ── Color transition animation ──────────────────────────────────────
+    private const int ColorAnimFrames = 20;       // ~330ms at 60fps (16ms ticks)
+    private const int ColorAnimIntervalMs = 16;
+    private System.Windows.Forms.Timer? _colorAnimTimer;
+    private int _colorAnimFrame;
+    private Rgba32[]? _prevNodeColors;
+    private Rgba32[]? _targetNodeColors;
+    private Rgba32[]? _prevEdgeColors;
+    private Rgba32[]? _targetEdgeColors;
+
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public string NodeColorMode
     {
         get => _nodeColorMode;
         set
         {
+            if (_nodeColorMode == value) return;
             _nodeColorMode = value;
-            RefreshColors();
-            Invalidate();
+            AnimateColorTransition();
         }
     }
 
@@ -136,16 +146,95 @@ public class SkiaGraphView : Control
         get => _edgeColorMode;
         set
         {
+            if (_edgeColorMode == value) return;
             _edgeColorMode = value;
-            RefreshColors();
-            Invalidate();
+            AnimateColorTransition();
         }
     }
 
     private void RefreshColors()
     {
+        StopColorAnimation();
         _nodeColors = _colorProvider.GetNodeColors(_nodeColorMode);
         _edgeColors = _colorProvider.GetEdgeColors(_edgeColorMode);
+    }
+
+    private void AnimateColorTransition()
+    {
+        if (_graph == null || _graph.NodeCount == 0)
+        {
+            RefreshColors();
+            Invalidate();
+            return;
+        }
+
+        // Snapshot current display colors as "from"
+        _prevNodeColors = (Rgba32[])_nodeColors.Clone();
+        _prevEdgeColors = (Rgba32[])_edgeColors.Clone();
+
+        // Compute target colors from new mode
+        _targetNodeColors = _colorProvider.GetNodeColors(_nodeColorMode);
+        _targetEdgeColors = _colorProvider.GetEdgeColors(_edgeColorMode);
+
+        _colorAnimFrame = 0;
+        StopColorAnimation();
+        _colorAnimTimer = new System.Windows.Forms.Timer { Interval = ColorAnimIntervalMs };
+        _colorAnimTimer.Tick += OnColorAnimTick;
+        _colorAnimTimer.Start();
+    }
+
+    private void OnColorAnimTick(object? sender, EventArgs e)
+    {
+        _colorAnimFrame++;
+        if (_colorAnimFrame >= ColorAnimFrames)
+        {
+            FinishColorAnimation();
+            return;
+        }
+
+        float t = (float)_colorAnimFrame / ColorAnimFrames;
+        t = t * t * (3f - 2f * t); // smoothstep
+
+        // Interpolate node colors
+        if (_prevNodeColors != null && _targetNodeColors != null)
+        {
+            int n = Math.Min(_prevNodeColors.Length, _targetNodeColors.Length);
+            if (_nodeColors.Length != n) _nodeColors = new Rgba32[n];
+            for (int i = 0; i < n; i++)
+                _nodeColors[i] = Rgba32.Lerp(_prevNodeColors[i], _targetNodeColors[i], t);
+        }
+
+        // Interpolate edge colors
+        if (_prevEdgeColors != null && _targetEdgeColors != null)
+        {
+            int m = Math.Min(_prevEdgeColors.Length, _targetEdgeColors.Length);
+            if (_edgeColors.Length != m) _edgeColors = new Rgba32[m];
+            for (int i = 0; i < m; i++)
+                _edgeColors[i] = Rgba32.Lerp(_prevEdgeColors[i], _targetEdgeColors[i], t);
+        }
+
+        Invalidate();
+    }
+
+    private void FinishColorAnimation()
+    {
+        StopColorAnimation();
+        _nodeColors = _targetNodeColors ?? _colorProvider.GetNodeColors(_nodeColorMode);
+        _edgeColors = _targetEdgeColors ?? _colorProvider.GetEdgeColors(_edgeColorMode);
+        _prevNodeColors = _targetNodeColors = null;
+        _prevEdgeColors = _targetEdgeColors = null;
+        Invalidate();
+    }
+
+    private void StopColorAnimation()
+    {
+        if (_colorAnimTimer != null)
+        {
+            _colorAnimTimer.Stop();
+            _colorAnimTimer.Tick -= OnColorAnimTick;
+            _colorAnimTimer.Dispose();
+            _colorAnimTimer = null;
+        }
     }
 
     // ── Performance instrumentation ─────────────────────────────────────

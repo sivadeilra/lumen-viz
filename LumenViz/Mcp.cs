@@ -397,18 +397,19 @@ public class McpServer
 
             ToolDef("set_color_mode",
                 "Set the node and/or edge color mode. " +
-                "Node modes: community (default, categorical by detected community), " +
-                "degree (sequential gradient by node degree — reveals hubs), " +
-                "in_out_ratio (diverging blue/white/red by in/out degree ratio — directed only, " +
-                "falls back to degree for undirected). " +
-                "Edge modes: uniform (default gray), community (intra-community edges colored, " +
-                "inter-community edges gray — reveals cluster boundaries).",
+                "Node modes: community (categorical), degree (sequential gradient), " +
+                "in_out_ratio (diverging, directed only), betweenness (centrality heatmap), " +
+                "pagerank (iterative importance, directed only), " +
+                "clustering (local clustering coefficient), kcore (k-core shell number). " +
+                "Edge modes: uniform (gray), community (intra/inter colored), " +
+                "weight (gradient by edge weight), reciprocity (mutual vs one-way, directed), " +
+                "bridge (highlight bridge/cut edges).",
                 Props(
                     ("window", "string", "Window ID", true),
                     ("node_mode", "string",
-                        "Node color mode: community, degree, in_out_ratio", false),
+                        "Node color mode: community, degree, in_out_ratio, betweenness, pagerank, clustering, kcore", false),
                     ("edge_mode", "string",
-                        "Edge color mode: uniform, community", false))),
+                        "Edge color mode: uniform, community, weight, reciprocity, bridge", false))),
 
             ToolDef("get_color_mode",
                 "Get the current node and edge color mode for a window.",

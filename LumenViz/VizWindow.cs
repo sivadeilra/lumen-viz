@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.Text.Json.Nodes;
 using LumenGraph;
 
@@ -18,6 +19,7 @@ public class VizWindow : Form
     private readonly StatusStrip _statusBar;
     private readonly ToolStripStatusLabel _statusLabel;
     private readonly MenuStrip _menuStrip;
+    private readonly ToolStripMenuItem _showLabelsItem;
 
     /// <summary>
     /// Thread-safe queue of user interaction events (node clicks, key
@@ -45,6 +47,52 @@ public class VizWindow : Form
         fileMenu.DropDownItems.Add(exitItem);
         _menuStrip.Items.Add(fileMenu);
 
+        // ── View menu ───────────────────────────────────────────────────
+        var viewMenu = new ToolStripMenuItem("&View");
+
+        _showLabelsItem = new ToolStripMenuItem("Show &Labels");
+        _showLabelsItem.ShortcutKeyDisplayString = "L";
+        _showLabelsItem.CheckOnClick = true;
+        _showLabelsItem.CheckedChanged += (_, _) =>
+        {
+            bool on = _showLabelsItem.Checked;
+            _graphView!.ShowLabels = on;
+            _skiaView!.ShowLabels = on;
+            _graphView.Invalidate();
+            _skiaView.Invalidate();
+        };
+        viewMenu.DropDownItems.Add(_showLabelsItem);
+
+        var showEdgesItem = new ToolStripMenuItem("Show &Edges");
+        showEdgesItem.ShortcutKeyDisplayString = "E";
+        showEdgesItem.Checked = true;
+        showEdgesItem.CheckOnClick = true;
+        showEdgesItem.CheckedChanged += (_, _) =>
+        {
+            bool on = showEdgesItem.Checked;
+            _graphView!.ShowEdges = on;
+            _skiaView!.ShowEdges = on;
+            _graphView.Invalidate();
+            _skiaView.Invalidate();
+        };
+        viewMenu.DropDownItems.Add(showEdgesItem);
+
+        var showMinimapItem = new ToolStripMenuItem("Show &Minimap");
+        showMinimapItem.ShortcutKeyDisplayString = "M";
+        showMinimapItem.Checked = true;
+        showMinimapItem.CheckOnClick = true;
+        showMinimapItem.CheckedChanged += (_, _) =>
+        {
+            bool on = showMinimapItem.Checked;
+            _graphView!.ShowMinimap = on;
+            _skiaView!.ShowMinimap = on;
+            _graphView.Invalidate();
+            _skiaView.Invalidate();
+        };
+        viewMenu.DropDownItems.Add(showMinimapItem);
+
+        _menuStrip.Items.Add(viewMenu);
+
         // ── Color menu ──────────────────────────────────────────────────
         var colorMenu = new ToolStripMenuItem("&Color");
 
@@ -55,6 +103,10 @@ public class VizWindow : Form
             ("Community", "community"),
             ("Degree Centrality", "degree"),
             ("In/Out Ratio (directed)", "in_out_ratio"),
+            ("Betweenness Centrality", "betweenness"),
+            ("PageRank (directed)", "pagerank"),
+            ("Clustering Coefficient", "clustering"),
+            ("K-Core Shell", "kcore"),
         };
         foreach (var (label, mode) in nodeColorItems)
         {
@@ -77,6 +129,9 @@ public class VizWindow : Form
         {
             ("Uniform", "uniform"),
             ("Community (intra/inter)", "community"),
+            ("Edge Weight", "weight"),
+            ("Reciprocity (directed)", "reciprocity"),
+            ("Bridge Edges", "bridge"),
         };
         foreach (var (label, mode) in edgeColorItems)
         {
@@ -152,6 +207,21 @@ public class VizWindow : Form
 
     /// <summary>Get the current edge color mode.</summary>
     public string EdgeColorMode => _useSkia ? _skiaView.EdgeColorMode : _graphView.EdgeColorMode;
+
+    /// <summary>Show or hide vertex labels on both renderers and sync the menu check.</summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool ShowLabels
+    {
+        get => _useSkia ? _skiaView.ShowLabels : _graphView.ShowLabels;
+        set
+        {
+            _graphView.ShowLabels = value;
+            _skiaView.ShowLabels = value;
+            _showLabelsItem.Checked = value;
+            _graphView.Invalidate();
+            _skiaView.Invalidate();
+        }
+    }
 
     /// <summary>Update check marks on a color sub-menu to show the active mode.</summary>
     private static void UpdateColorMenuChecks(ToolStripMenuItem parentMenu, string activeMode)
@@ -325,12 +395,22 @@ public class VizWindow : Form
             return;
         }
 
+        // 'L' toggles labels — sync menu check
+        if (e.KeyCode == Keys.L && e.Modifiers == Keys.None)
+        {
+            _showLabelsItem.Checked = !_showLabelsItem.Checked;
+            // CheckedChanged handler syncs the views
+            e.Handled = true;
+            e.SuppressKeyPress = true; // prevent view from double-toggling
+            return;
+        }
+
         // Navigation keys handled by GraphView.OnKeyDown directly.
         // Don't double-report those as interaction events.
         if (e.KeyCode is Keys.PageUp or Keys.PageDown or Keys.Home or Keys.End
             or Keys.Left or Keys.Right or Keys.Up or Keys.Down
             or Keys.Oemplus or Keys.OemMinus or Keys.Add or Keys.Subtract
-            or Keys.F or Keys.L or Keys.M or Keys.E
+            or Keys.F or Keys.M or Keys.E
             or Keys.D0 or Keys.D9)
             return;
 
