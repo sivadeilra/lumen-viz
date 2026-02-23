@@ -25,6 +25,13 @@ public class ForceLayout
     /// <summary>Gravity constant — pulls nodes toward center to prevent drift.</summary>
     public double Gravity { get; set; } = 0.05;
 
+    /// <summary>
+    /// When true (default), nodes are confined inside Width×Height with soft
+    /// boundary pull-back. When false, layout runs in unbounded free space —
+    /// k is derived purely from node count and no boundary forces are applied.
+    /// </summary>
+    public bool Bounded { get; set; } = true;
+
     public ForceLayout(GraphModel graph)
     {
         _graph = graph;
@@ -37,10 +44,25 @@ public class ForceLayout
     {
         var px = _graph.NodeX;
         var py = _graph.NodeY;
-        for (int i = 0; i < _graph.NodeCount; i++)
+        if (Bounded)
         {
-            px[i] = _rng.NextDouble() * Width;
-            py[i] = _rng.NextDouble() * Height;
+            for (int i = 0; i < _graph.NodeCount; i++)
+            {
+                px[i] = _rng.NextDouble() * Width;
+                py[i] = _rng.NextDouble() * Height;
+            }
+        }
+        else
+        {
+            // Unbounded: scatter in a circle of radius ~ sqrt(n) * 10
+            double radius = Math.Sqrt(_graph.NodeCount) * 10;
+            for (int i = 0; i < _graph.NodeCount; i++)
+            {
+                double angle = _rng.NextDouble() * 2 * Math.PI;
+                double r = _rng.NextDouble() * radius;
+                px[i] = r * Math.Cos(angle);
+                py[i] = r * Math.Sin(angle);
+            }
         }
     }
 
@@ -52,8 +74,13 @@ public class ForceLayout
         int n = _graph.NodeCount;
         if (n == 0) return;
 
-        double area = Width * Height;
-        double k = Math.Sqrt(area / n);   // optimal edge length
+        // Optimal edge length k:
+        // Bounded: derived from box area.  Unbounded: from node count.
+        double k;
+        if (Bounded)
+            k = Math.Sqrt(Width * Height / n);
+        else
+            k = Math.Sqrt(10000.0 / Math.Sqrt(n));  // ~constant density
         double k2 = k * k;
 
         // Alias the position arrays for tight inner loops
@@ -71,7 +98,7 @@ public class ForceLayout
         double[] dx = new double[n];
         double[] dy = new double[n];
 
-        double temp = Width / 10.0;  // initial temperature
+        double temp = Bounded ? Width / 10.0 : k * 5.0;  // initial temperature
         double cooling = temp / (Iterations + 1);
 
         for (int iter = 0; iter < Iterations; iter++)
@@ -129,8 +156,9 @@ public class ForceLayout
             }
 
             // ── Gravity toward center ──────────────────────────────────
-            double cx = Width / 2.0;
-            double cy = Height / 2.0;
+            // Bounded: pull toward box center.  Unbounded: pull toward origin.
+            double cx = Bounded ? Width / 2.0 : 0.0;
+            double cy = Bounded ? Height / 2.0 : 0.0;
             for (int i = 0; i < n; i++)
             {
                 double deltaX = px[i] - cx;
@@ -154,15 +182,17 @@ public class ForceLayout
                     py[i] += dy[i] * scale;
                 }
 
-                // Soft pull toward center — no hard clamping.
-                // Nodes that drift far out are gently pulled back,
-                // but never snapped to a wall.
-                double margin = 50;
-                double pullStrength = 0.1;
-                if (px[i] < margin)       px[i] += (margin - px[i]) * pullStrength;
-                if (px[i] > Width - margin)  px[i] -= (px[i] - (Width - margin)) * pullStrength;
-                if (py[i] < margin)       py[i] += (margin - py[i]) * pullStrength;
-                if (py[i] > Height - margin) py[i] -= (py[i] - (Height - margin)) * pullStrength;
+                // Bounded mode: soft pull toward box interior.
+                // Unbounded mode: no boundary at all — gravity alone prevents drift.
+                if (Bounded)
+                {
+                    double margin = 50;
+                    double pullStrength = 0.1;
+                    if (px[i] < margin)          px[i] += (margin - px[i]) * pullStrength;
+                    if (px[i] > Width - margin)  px[i] -= (px[i] - (Width - margin)) * pullStrength;
+                    if (py[i] < margin)          py[i] += (margin - py[i]) * pullStrength;
+                    if (py[i] > Height - margin) py[i] -= (py[i] - (Height - margin)) * pullStrength;
+                }
             }
 
             temp -= cooling;

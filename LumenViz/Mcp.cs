@@ -266,7 +266,9 @@ public class McpServer
                     ("path", "string", "Absolute path to a .mtx file", true),
                     ("iterations", "string", "Layout iterations (default 300)", false),
                     ("gravity", "string", "Gravity constant (default 0.05)", false),
-                    ("layout", "string", "Layout mode: 'auto' (default), 'flat', or 'multilevel'", false))),
+                    ("layout", "string", "Layout mode: 'auto' (default), 'flat', or 'multilevel'", false),
+                    ("bounded", "string", "'true' (default) for rectangle-bounded layout, 'false' for unbounded free space", false),
+                    ("aspect_ratio", "string", "Aspect ratio W:H for bounded mode, e.g. '4:3' or '16:9' (default '1:1')", false))),
 
             ToolDef("get_graph_info",
                 "Get info about the graph loaded in a window.",
@@ -277,7 +279,9 @@ public class McpServer
                 Props(
                     ("window", "string", "Window ID", true),
                     ("iterations", "string", "Number of iterations (default 300)", false),
-                    ("layout", "string", "Layout mode: 'auto' (default), 'flat', or 'multilevel'", false))),
+                    ("layout", "string", "Layout mode: 'auto' (default), 'flat', or 'multilevel'", false),
+                    ("bounded", "string", "'true' (default) for rectangle-bounded, 'false' for unbounded", false),
+                    ("aspect_ratio", "string", "Aspect ratio W:H for bounded mode, e.g. '4:3' (default '1:1')", false))),
 
             ToolDef("auto_fit",
                 "Re-center and zoom to fit the graph in a window.",
@@ -402,10 +406,14 @@ public class McpServer
                 "load_graph_with_layout" => LoadGraph(args,
                     IntArg(args, "iterations", 300),
                     DoubleArg(args, "gravity", 0.05),
-                    ArgOr(args, "layout", "auto")),
+                    ArgOr(args, "layout", "auto"),
+                    BoolArg(args, "bounded", true),
+                    ArgOr(args, "aspect_ratio", "1:1")),
                 "get_graph_info" => GetGraphInfo(args),
                 "rerun_layout" => RerunLayout(args, IntArg(args, "iterations", 300),
-                    ArgOr(args, "layout", "auto")),
+                    ArgOr(args, "layout", "auto"),
+                    BoolArg(args, "bounded", true),
+                    ArgOr(args, "aspect_ratio", "1:1")),
                 "auto_fit" => AutoFitWindow(args),
 
                 // ── Visual settings ────────────────────────────────────
@@ -775,16 +783,17 @@ public class McpServer
     // Graph tools
     // -----------------------------------------------------------------------
 
-    private string LoadGraph(JsonNode? args, int iterations, double gravity, string layoutMode)
+    private string LoadGraph(JsonNode? args, int iterations, double gravity, string layoutMode,
+        bool bounded = true, string aspectRatio = "1:1")
     {
         var win = GetWindow(args);
         var path = Arg(args, "path");
-        Log($"    Loading graph from {path}");
+        Log($"    Loading graph from {path} (bounded={bounded}, aspect={aspectRatio})");
 
         var graph = MatrixMarketReader.ReadFile(path);
         graph.DetectCommunities();
 
-        var hierarchy = RunLayout(graph, iterations, gravity, layoutMode);
+        var hierarchy = RunLayout(graph, iterations, gravity, layoutMode, bounded, aspectRatio);
 
         InvokeOnUI(() =>
         {
@@ -808,6 +817,8 @@ public class McpServer
             ["nodes"] = graph.NodeCount,
             ["edges"] = graph.EdgeCount,
             ["communities"] = communities,
+            ["bounded"] = bounded,
+            ["aspect_ratio"] = aspectRatio,
             ["status"] = "loaded and displayed",
         };
         if (hierarchy != null)
@@ -832,7 +843,8 @@ public class McpServer
         });
     }
 
-    private string RerunLayout(JsonNode? args, int iterations, string layoutMode)
+    private string RerunLayout(JsonNode? args, int iterations, string layoutMode,
+        bool bounded = true, string aspectRatio = "1:1")
     {
         var win = GetWindow(args);
         return InvokeOnUI(() =>
@@ -840,7 +852,7 @@ public class McpServer
             var graph = win.GraphView.GetGraph();
             if (graph == null) return "No graph loaded";
 
-            var hierarchy = RunLayout(graph, iterations, 0.05, layoutMode);
+            var hierarchy = RunLayout(graph, iterations, 0.05, layoutMode, bounded, aspectRatio);
             if (hierarchy != null)
                 win.GraphView.SetGraphWithHierarchy(graph, hierarchy);
             else
@@ -860,8 +872,11 @@ public class McpServer
     /// "flat": always flat FR.
     /// Returns the coarsening hierarchy if multi-level was used, null otherwise.
     /// </summary>
-    private static CoarseningHierarchy? RunLayout(GraphModel graph, int iterations, double gravity, string mode)
+    private static CoarseningHierarchy? RunLayout(GraphModel graph, int iterations, double gravity, string mode,
+        bool bounded = true, string aspectRatio = "1:1")
     {
+        var (w, h) = bounded ? ParseAspectRatio(aspectRatio) : (1000.0, 1000.0);
+
         bool useMultiLevel = mode switch
         {
             "multilevel" => true,
@@ -873,11 +888,12 @@ public class McpServer
         {
             var ml = new MultiLevelLayout(graph)
             {
-                Width = 1000,
-                Height = 1000,
+                Width = w,
+                Height = h,
                 Gravity = gravity,
                 CoarseIterations = Math.Max(iterations, 500),
                 RefineIterations = Math.Min(iterations, 50),
+                Bounded = bounded,
             };
             ml.Run();
             return ml.Hierarchy;
@@ -886,10 +902,11 @@ public class McpServer
         {
             var layout = new ForceLayout(graph)
             {
-                Width = 1000,
-                Height = 1000,
+                Width = w,
+                Height = h,
                 Iterations = iterations,
                 Gravity = gravity,
+                Bounded = bounded,
             };
             layout.Run();
             return null;
@@ -1151,6 +1168,30 @@ public class McpServer
         return s != null && double.TryParse(s,
             System.Globalization.CultureInfo.InvariantCulture, out var v)
             ? v : fallback;
+    }
+
+    private static bool BoolArg(JsonNode? args, string name, bool fallback)
+    {
+        var s = args?[name]?.GetValue<string>();
+        if (s == null) return fallback;
+        return s.Equals("true", StringComparison.OrdinalIgnoreCase)
+            || s == "1" || s.Equals("yes", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Parse "W:H" aspect ratio string into (width, height) layout dimensions.</summary>
+    private static (double w, double h) ParseAspectRatio(string ratio, double baseSize = 1000)
+    {
+        var parts = ratio.Split(':');
+        if (parts.Length == 2
+            && double.TryParse(parts[0], System.Globalization.CultureInfo.InvariantCulture, out var rw)
+            && double.TryParse(parts[1], System.Globalization.CultureInfo.InvariantCulture, out var rh)
+            && rw > 0 && rh > 0)
+        {
+            // Scale so the larger dimension = baseSize
+            double maxDim = Math.Max(rw, rh);
+            return (baseSize * rw / maxDim, baseSize * rh / maxDim);
+        }
+        return (baseSize, baseSize);
     }
 
     private static Color ParseColor(string s)
