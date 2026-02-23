@@ -1,0 +1,17 @@
+# Directed edge list: a small dependency DAG
+# directed
+# Represents build dependencies between modules.
+main compiler
+main linker
+compiler parser
+compiler lexer
+compiler types
+parser lexer
+parser ast
+lexer tokens
+linker codegen
+linker optimizer
+codegen types
+codegen ast
+optimizer codegen
+types ast

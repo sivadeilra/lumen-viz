@@ -1,4 +1,4 @@
-namespace LumenViz;
+namespace LumenGraph;
 
 /// <summary>
 /// High-performance graph data model using parallel arrays and CSR
@@ -18,6 +18,14 @@ namespace LumenViz;
 /// </summary>
 public sealed class GraphModel
 {
+    // ── Graph properties ────────────────────────────────────────────
+    /// <summary>
+    /// Whether edges have direction. When true, EdgeSource[i]→EdgeTarget[i]
+    /// is a directed arc. When false, edges are unordered pairs.
+    /// CSR adjacency is always bidirectional (layout algorithms need it).
+    /// </summary>
+    public bool IsDirected { get; set; }
+
     // ── Node data (parallel arrays, indexed by node ID 0..N-1) ──────
     public int NodeCount { get; private set; }
     public double[] NodeX = Array.Empty<double>();

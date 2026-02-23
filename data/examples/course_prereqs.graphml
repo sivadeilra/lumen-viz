@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns">
+  <key id="d0" for="node" attr.name="label" attr.type="string"/>
+  <graph id="G" edgedefault="directed">
+    <!-- A directed acyclic graph: course prerequisites -->
+    <node id="calc1"><data key="d0">Calculus I</data></node>
+    <node id="calc2"><data key="d0">Calculus II</data></node>
+    <node id="calc3"><data key="d0">Calculus III</data></node>
+    <node id="linalg"><data key="d0">Linear Algebra</data></node>
+    <node id="diffeq"><data key="d0">Diff Equations</data></node>
+    <node id="prob"><data key="d0">Probability</data></node>
+    <node id="stats"><data key="d0">Statistics</data></node>
+    <node id="discrete"><data key="d0">Discrete Math</data></node>
+    <node id="algo"><data key="d0">Algorithms</data></node>
+    <node id="ds"><data key="d0">Data Structures</data></node>
+    <node id="intro"><data key="d0">Intro to CS</data></node>
+    <node id="ml"><data key="d0">Machine Learning</data></node>
+    <node id="graphics"><data key="d0">Computer Graphics</data></node>
+    <node id="acalc"><data key="d0">Advanced Calculus</data></node>
+    <node id="numan"><data key="d0">Numerical Analysis</data></node>
+    <!-- Prerequisites (directed: from prerequisite to course) -->
+    <edge source="calc1" target="calc2"/>
+    <edge source="calc2" target="calc3"/>
+    <edge source="calc2" target="diffeq"/>
+    <edge source="calc2" target="prob"/>
+    <edge source="calc3" target="acalc"/>
+    <edge source="calc1" target="linalg"/>
+    <edge source="linalg" target="numan"/>
+    <edge source="linalg" target="graphics"/>
+    <edge source="linalg" target="ml"/>
+    <edge source="diffeq" target="numan"/>
+    <edge source="prob" target="stats"/>
+    <edge source="stats" target="ml"/>
+    <edge source="discrete" target="algo"/>
+    <edge source="discrete" target="ds"/>
+    <edge source="intro" target="ds"/>
+    <edge source="ds" target="algo"/>
+    <edge source="algo" target="ml"/>
+    <edge source="algo" target="graphics"/>
+    <edge source="acalc" target="numan"/>
+  </graph>
+</graphml>

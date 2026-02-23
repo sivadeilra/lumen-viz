@@ -1,4 +1,4 @@
-namespace LumenViz;
+namespace LumenGraph;
 
 /// <summary>
 /// One level of the HEM coarsening hierarchy.

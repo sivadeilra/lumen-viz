@@ -1,6 +1,6 @@
 using System.Globalization;
 
-namespace LumenViz;
+namespace LumenGraph;
 
 /// <summary>
 /// Reads Matrix Market (.mtx) exchange format files produced by
@@ -40,6 +40,9 @@ public static class MatrixMarketReader
 
         bool isPattern = qualifierField == "pattern";
         bool isSymmetric = symmetry == "symmetric";
+
+        // Non-symmetric (general) matrices represent directed graphs
+        graph.IsDirected = !isSymmetric;
 
         // ── Skip comment lines ─────────────────────────────────────────
         string? line;
@@ -85,15 +88,27 @@ public static class MatrixMarketReader
             // Skip self-loops for graph visualization
             if (i == j) continue;
 
-            // Normalize edge direction so we don't duplicate
-            int lo = Math.Min(i, j);
-            int hi = Math.Max(i, j);
-
-            if (edgeSet.Add((lo, hi)))
+            if (isSymmetric)
             {
-                tmpSrc.Add(lo);
-                tmpTgt.Add(hi);
-                tmpWgt.Add(weight);
+                // Undirected: normalize to (min, max) to dedup
+                int lo = Math.Min(i, j);
+                int hi = Math.Max(i, j);
+                if (edgeSet.Add((lo, hi)))
+                {
+                    tmpSrc.Add(lo);
+                    tmpTgt.Add(hi);
+                    tmpWgt.Add(weight);
+                }
+            }
+            else
+            {
+                // Directed: preserve original direction, dedup by ordered pair
+                if (edgeSet.Add((i, j)))
+                {
+                    tmpSrc.Add(i);
+                    tmpTgt.Add(j);
+                    tmpWgt.Add(weight);
+                }
             }
         }
 

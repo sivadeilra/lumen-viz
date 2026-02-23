@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using SkiaSharp;
+using LumenGraph;
 
 namespace LumenViz;
 

@@ -1,4 +1,4 @@
-namespace LumenViz;
+namespace LumenGraph;
 
 /// <summary>
 /// Multi-level force-directed layout using HEM coarsening.

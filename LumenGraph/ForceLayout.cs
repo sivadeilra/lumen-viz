@@ -1,4 +1,4 @@
-namespace LumenViz;
+namespace LumenGraph;
 
 /// <summary>
 /// Fruchterman–Reingold force-directed graph layout.

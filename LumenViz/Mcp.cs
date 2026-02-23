@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using LumenGraph;
 
 namespace LumenViz;
 
@@ -254,16 +255,17 @@ public class McpServer
 
             // ── Graph visualization ────────────────────────────────────
             ToolDef("load_graph",
-                "Load a graph from a Matrix Market (.mtx) file into a window. " +
+                "Load a graph file into a window. Supports: .mtx (Matrix Market), " +
+                ".gml (GML), .graphml (GraphML), .csv/.tsv/.edges/.txt (edge list). " +
                 "Runs community detection and force-directed layout automatically.",
                 PropsReq(("window", "string", "Window ID"),
-                      ("path", "string", "Absolute path to a .mtx file"))),
+                      ("path", "string", "Absolute path to a graph file"))),
 
             ToolDef("load_graph_with_layout",
                 "Load a graph with custom layout parameters.",
                 Props(
                     ("window", "string", "Window ID", true),
-                    ("path", "string", "Absolute path to a .mtx file", true),
+                    ("path", "string", "Absolute path to a graph file (.mtx, .gml, .graphml, .csv, .edges, etc.)", true),
                     ("iterations", "string", "Layout iterations (default 300)", false),
                     ("gravity", "string", "Gravity constant (default 0.05)", false),
                     ("layout", "string", "Layout mode: 'auto' (default), 'flat', or 'multilevel'", false),
@@ -315,7 +317,8 @@ public class McpServer
 
             // ── Data ───────────────────────────────────────────────────
             ToolDef("list_data_files",
-                "List available .mtx data files in c:\\lumen-viz\\data.",
+                "List available graph data files in c:\\lumen-viz\\data. " +
+                "Supports: .mtx, .gml, .graphml, .csv, .tsv, .edges, .txt",
                 Props()),
 
             // ── Window geometry ─────────────────────────────────────────
@@ -932,7 +935,7 @@ public class McpServer
         var path = Arg(args, "path");
         Log($"    Loading graph from {path} (bounded={bounded}, aspect={aspectRatio})");
 
-        var graph = MatrixMarketReader.ReadFile(path);
+        var graph = GraphReader.ReadFile(path);
         graph.DetectCommunities();
 
         var hierarchy = RunLayout(graph, iterations, gravity, layoutMode, bounded, aspectRatio);
@@ -972,6 +975,7 @@ public class McpServer
             ["title"] = graph.Title,
             ["nodes"] = graph.NodeCount,
             ["edges"] = graph.EdgeCount,
+            ["directed"] = graph.IsDirected,
             ["communities"] = communities,
             ["bounded"] = bounded,
             ["aspect_ratio"] = aspectRatio,
@@ -994,6 +998,7 @@ public class McpServer
                 ["title"] = graph.Title,
                 ["nodes"] = graph.NodeCount,
                 ["edges"] = graph.EdgeCount,
+                ["directed"] = graph.IsDirected,
                 ["communities"] = CountCommunities(graph),
             }.ToJsonString();
         });
@@ -1267,11 +1272,11 @@ public class McpServer
         if (!Directory.Exists(dataDir))
             return "No data directory found";
 
-        var files = Directory.GetFiles(dataDir, "*.mtx", SearchOption.AllDirectories);
+        var files = GraphReader.FindGraphFiles(dataDir).OrderBy(f => f).ToArray();
         var list = new JsonArray();
         foreach (var f in files)
             list.Add(f);
-        return new JsonObject { ["files"] = list }.ToJsonString();
+        return new JsonObject { ["files"] = list, ["count"] = files.Length }.ToJsonString();
     }
 
     // -----------------------------------------------------------------------

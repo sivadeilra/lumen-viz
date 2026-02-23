@@ -1,4 +1,4 @@
-namespace LumenViz;
+namespace LumenGraph;
 
 /// <summary>
 /// Barnes-Hut quadtree for O(n log n) repulsive force approximation.
