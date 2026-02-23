@@ -24,6 +24,10 @@ public class McpServer
     private readonly ConcurrentDictionary<string, VizWindow> _windows = new();
     private int _windowCounter;
 
+    /// <summary>Headless graph store, independent of windows.</summary>
+    private readonly ConcurrentDictionary<string, GraphModel> _graphs = new();
+    private int _graphCounter;
+
     /// <summary>
     /// Hidden form used to marshal calls to the UI thread when no
     /// visible windows exist yet.
@@ -449,6 +453,100 @@ public class McpServer
             ToolDef("get_color_mode",
                 "Get the current node and edge color mode for a window.",
                 PropsReq(("window", "string", "Window ID"))),
+
+            // ── Headless graph store ───────────────────────────────────
+            ToolDef("graph_load",
+                "Load a graph file into the headless graph store (no window needed). " +
+                "Returns a graph_id for use with other graph_* tools. " +
+                "Community detection is run automatically.",
+                Props(
+                    ("path", "string", "Path to graph file", true),
+                    ("graph_id", "string", "Optional custom ID. Auto-generated if omitted.", false))),
+
+            ToolDef("graph_list",
+                "List all graphs currently held in the headless graph store.",
+                new JsonObject()),
+
+            ToolDef("graph_info",
+                "Get info about a graph in the store (nodes, edges, directed, communities).",
+                PropsReq(("graph", "string", "Graph ID from graph_load"))),
+
+            ToolDef("graph_metrics",
+                "Compute a metric for all nodes and return the top/bottom N results. " +
+                "Available metrics: degree, indegree, outdegree, pagerank, betweenness, " +
+                "clustering, kcore, in_out_ratio, reciprocity.",
+                Props(
+                    ("graph", "string", "Graph ID", true),
+                    ("metric", "string", "Metric name", true),
+                    ("count", "string", "Number of results (default 20)", false),
+                    ("order", "string", "desc (default) or asc", false),
+                    ("community", "string", "Filter to a specific community number", false))),
+
+            ToolDef("graph_stats",
+                "Compute descriptive statistics for a node metric: mean, median, std dev, " +
+                "skewness, kurtosis, quantiles (5%, 25%, 75%, 95%), min, max.",
+                Props(
+                    ("graph", "string", "Graph ID", true),
+                    ("metric", "string", "Metric name (degree, pagerank, betweenness, etc.)", true))),
+
+            ToolDef("graph_histogram",
+                "Compute a histogram of a node metric distribution.",
+                Props(
+                    ("graph", "string", "Graph ID", true),
+                    ("metric", "string", "Metric name", true),
+                    ("bins", "string", "Number of bins (default 20)", false))),
+
+            ToolDef("graph_degree_distribution",
+                "Get the degree distribution and test for power-law fit. " +
+                "Returns (degree, count) pairs and power-law exponent with R².",
+                PropsReq(("graph", "string", "Graph ID"))),
+
+            ToolDef("graph_correlate",
+                "Compute Pearson and Spearman correlation between two node metrics.",
+                Props(
+                    ("graph", "string", "Graph ID", true),
+                    ("metric_a", "string", "First metric name", true),
+                    ("metric_b", "string", "Second metric name", true))),
+
+            ToolDef("graph_correlation_matrix",
+                "Compute the full Pearson correlation matrix across all 9 node metrics. " +
+                "Reveals which metrics are redundant vs independent.",
+                PropsReq(("graph", "string", "Graph ID"))),
+
+            ToolDef("graph_find_bridges",
+                "Find 'power broker' nodes that rank in the top-N for multiple metrics simultaneously.",
+                Props(
+                    ("graph", "string", "Graph ID", true),
+                    ("metrics", "string", "Comma-separated metric names (e.g. pagerank,betweenness)", true),
+                    ("top_n", "string", "Top N per metric to consider (default 20)", false))),
+
+            ToolDef("graph_neighbors",
+                "Get the neighbors of a node with their labels, communities, and degrees.",
+                Props(
+                    ("graph", "string", "Graph ID", true),
+                    ("node", "string", "Node index", true))),
+
+            ToolDef("graph_node_profile",
+                "Get a full profile of a node: all 9 metrics, label, community, degree, neighbors count.",
+                Props(
+                    ("graph", "string", "Graph ID", true),
+                    ("node", "string", "Node index", true))),
+
+            ToolDef("graph_fft",
+                "Compute FFT power spectrum of a metric's sorted distribution. " +
+                "Reveals periodic structure or characteristic scales in the network. " +
+                "Returns dominant frequency peaks.",
+                Props(
+                    ("graph", "string", "Graph ID", true),
+                    ("metric", "string", "Metric name", true),
+                    ("max_peaks", "string", "Max dominant peaks to return (default 10)", false))),
+
+            ToolDef("graph_show",
+                "Display a graph from the store in a visualization window. " +
+                "Bridges headless analysis with visual exploration.",
+                Props(
+                    ("graph", "string", "Graph ID", true),
+                    ("window", "string", "Window ID (auto-creates if needed)", true))),
         };
     }
 
@@ -884,6 +982,22 @@ public class McpServer
                 // ── Color modes ───────────────────────────────────────────
                 "set_color_mode" => SetColorMode(args),
                 "get_color_mode" => GetColorMode(args),
+
+                // ── Headless graph store ──────────────────────────────────
+                "graph_load" => GraphLoad(args),
+                "graph_list" => GraphList(),
+                "graph_info" => GraphInfo(args),
+                "graph_metrics" => GraphMetrics(args),
+                "graph_stats" => GraphStats(args),
+                "graph_histogram" => GraphHistogram(args),
+                "graph_degree_distribution" => GraphDegreeDistribution(args),
+                "graph_correlate" => GraphCorrelate(args),
+                "graph_correlation_matrix" => GraphCorrelationMatrix(args),
+                "graph_find_bridges" => GraphFindBridges(args),
+                "graph_neighbors" => GraphNeighbors(args),
+                "graph_node_profile" => GraphNodeProfile(args),
+                "graph_fft" => GraphFft(args),
+                "graph_show" => GraphShow(args),
 
                 _ => throw new InvalidOperationException(
                     $"Unknown tool: {toolName}"),
@@ -1438,6 +1552,417 @@ public class McpServer
     }
 
     // -----------------------------------------------------------------------
+    // Headless graph store tools
+    // -----------------------------------------------------------------------
+
+    private GraphModel GetGraph(JsonNode? args)
+    {
+        var graphId = Arg(args, "graph");
+        if (_graphs.TryGetValue(graphId, out var graph))
+            return graph;
+        throw new ArgumentException($"Graph not found: {graphId}. Use graph_load first.");
+    }
+
+    private string GraphLoad(JsonNode? args)
+    {
+        var path = Arg(args, "path");
+        var customId = OptArg(args, "graph_id");
+        string graphId = customId ?? $"g{Interlocked.Increment(ref _graphCounter)}";
+
+        Log($"    Loading graph '{graphId}' from {path}");
+        var graph = GraphReader.ReadFile(path);
+        graph.DetectCommunities();
+        _graphs[graphId] = graph;
+
+        return new JsonObject
+        {
+            ["graph_id"] = graphId,
+            ["title"] = graph.Title,
+            ["nodes"] = graph.NodeCount,
+            ["edges"] = graph.EdgeCount,
+            ["directed"] = graph.IsDirected,
+            ["communities"] = CountCommunities(graph),
+        }.ToJsonString();
+    }
+
+    private string GraphList()
+    {
+        var list = new JsonArray();
+        foreach (var (id, graph) in _graphs)
+        {
+            list.Add(new JsonObject
+            {
+                ["graph_id"] = id,
+                ["title"] = graph.Title,
+                ["nodes"] = graph.NodeCount,
+                ["edges"] = graph.EdgeCount,
+                ["directed"] = graph.IsDirected,
+            });
+        }
+        return new JsonObject { ["graphs"] = list, ["count"] = list.Count }.ToJsonString();
+    }
+
+    private string GraphInfo(JsonNode? args)
+    {
+        var graph = GetGraph(args);
+        return new JsonObject
+        {
+            ["title"] = graph.Title,
+            ["nodes"] = graph.NodeCount,
+            ["edges"] = graph.EdgeCount,
+            ["directed"] = graph.IsDirected,
+            ["communities"] = CountCommunities(graph),
+        }.ToJsonString();
+    }
+
+    private string GraphMetrics(JsonNode? args)
+    {
+        var graph = GetGraph(args);
+        string metric = Arg(args, "metric");
+        int count = int.TryParse(OptArg(args, "count"), out int c) ? c : 20;
+        string order = OptArg(args, "order") ?? "desc";
+        int? community = int.TryParse(OptArg(args, "community"), out int comm) ? comm : null;
+
+        var provider = new NodeColorProvider();
+        provider.SetGraph(graph);
+        double[] values = provider.ComputeNodeMetric(metric);
+
+        var candidates = Enumerable.Range(0, graph.NodeCount);
+        if (community.HasValue)
+            candidates = candidates.Where(i => graph.Community[i] == community.Value);
+
+        int[] sorted;
+        if (order == "asc")
+            sorted = candidates.OrderBy(i => values[i]).Take(count).ToArray();
+        else
+            sorted = candidates.OrderByDescending(i => values[i]).Take(count).ToArray();
+
+        var nodes = new JsonArray();
+        foreach (int i in sorted)
+        {
+            nodes.Add(new JsonObject
+            {
+                ["index"] = i,
+                ["label"] = graph.Labels[i],
+                ["community"] = graph.Community[i],
+                [metric] = Math.Round(values[i], 6),
+            });
+        }
+
+        return new JsonObject
+        {
+            ["metric"] = metric,
+            ["order"] = order,
+            ["count"] = sorted.Length,
+            ["nodes"] = nodes,
+        }.ToJsonString();
+    }
+
+    private string GraphStats(JsonNode? args)
+    {
+        var graph = GetGraph(args);
+        string metric = Arg(args, "metric");
+
+        var provider = new NodeColorProvider();
+        provider.SetGraph(graph);
+        double[] values = provider.ComputeNodeMetric(metric);
+
+        var stats = GraphAnalytics.Describe(values);
+        return JsonSerializer.Serialize(new
+        {
+            metric,
+            count = stats.Count,
+            mean = Math.Round(stats.Mean, 6),
+            std_dev = Math.Round(stats.StdDev, 6),
+            variance = Math.Round(stats.Variance, 6),
+            skewness = Math.Round(stats.Skewness, 6),
+            kurtosis = Math.Round(stats.Kurtosis, 6),
+            min = Math.Round(stats.Min, 6),
+            max = Math.Round(stats.Max, 6),
+            median = Math.Round(stats.Median, 6),
+            q05 = Math.Round(stats.Q05, 6),
+            q25 = Math.Round(stats.Q25, 6),
+            q75 = Math.Round(stats.Q75, 6),
+            q95 = Math.Round(stats.Q95, 6),
+        }, new JsonSerializerOptions { WriteIndented = true });
+    }
+
+    private string GraphHistogram(JsonNode? args)
+    {
+        var graph = GetGraph(args);
+        string metric = Arg(args, "metric");
+        int bins = int.TryParse(OptArg(args, "bins"), out int b) ? b : 20;
+
+        var provider = new NodeColorProvider();
+        provider.SetGraph(graph);
+        double[] values = provider.ComputeNodeMetric(metric);
+
+        var hist = GraphAnalytics.Histogram(values, bins);
+        var binsArr = new JsonArray();
+        for (int i = 0; i < hist.Counts.Length; i++)
+        {
+            binsArr.Add(new JsonObject
+            {
+                ["center"] = Math.Round(hist.BinCenters[i], 6),
+                ["count"] = hist.Counts[i],
+            });
+        }
+
+        return new JsonObject
+        {
+            ["metric"] = metric,
+            ["bins"] = binsArr,
+            ["total"] = values.Length,
+        }.ToJsonString();
+    }
+
+    private string GraphDegreeDistribution(JsonNode? args)
+    {
+        var graph = GetGraph(args);
+        var dist = GraphAnalytics.DegreeDistribution(graph);
+        var (alpha, rSquared) = GraphAnalytics.PowerLawFit(graph);
+
+        var pairs = new JsonArray();
+        foreach (var (degree, count) in dist)
+        {
+            pairs.Add(new JsonObject
+            {
+                ["degree"] = degree,
+                ["count"] = count,
+            });
+        }
+
+        return new JsonObject
+        {
+            ["distribution"] = pairs,
+            ["distinct_degrees"] = dist.Length,
+            ["power_law"] = new JsonObject
+            {
+                ["alpha"] = Math.Round(alpha, 4),
+                ["r_squared"] = Math.Round(rSquared, 4),
+                ["is_power_law"] = rSquared > 0.8,
+            },
+        }.ToJsonString();
+    }
+
+    private string GraphCorrelate(JsonNode? args)
+    {
+        var graph = GetGraph(args);
+        string metricA = Arg(args, "metric_a");
+        string metricB = Arg(args, "metric_b");
+
+        var provider = new NodeColorProvider();
+        provider.SetGraph(graph);
+        double[] a = provider.ComputeNodeMetric(metricA);
+        double[] b = provider.ComputeNodeMetric(metricB);
+
+        double pearson = GraphAnalytics.PearsonCorrelation(a, b);
+        double spearman = GraphAnalytics.SpearmanCorrelation(a, b);
+
+        return JsonSerializer.Serialize(new
+        {
+            metric_a = metricA,
+            metric_b = metricB,
+            pearson = double.IsNaN(pearson) ? 0.0 : Math.Round(pearson, 6),
+            spearman = double.IsNaN(spearman) ? 0.0 : Math.Round(spearman, 6),
+            interpretation = Math.Abs(pearson) > 0.7 ? "strongly correlated" :
+                             Math.Abs(pearson) > 0.4 ? "moderately correlated" :
+                             "weakly correlated",
+        }, new JsonSerializerOptions { WriteIndented = true });
+    }
+
+    private string GraphCorrelationMatrix(JsonNode? args)
+    {
+        var graph = GetGraph(args);
+        var (names, matrix) = GraphAnalytics.MetricCorrelationMatrix(graph);
+
+        var rows = new JsonArray();
+        for (int i = 0; i < names.Length; i++)
+        {
+            var row = new JsonObject { ["metric"] = names[i] };
+            for (int j = 0; j < names.Length; j++)
+                row[names[j]] = Math.Round(matrix[i, j], 3);
+            rows.Add(row);
+        }
+
+        return new JsonObject
+        {
+            ["metrics"] = JsonSerializer.SerializeToNode(names),
+            ["matrix"] = rows,
+        }.ToJsonString();
+    }
+
+    private string GraphFindBridges(JsonNode? args)
+    {
+        var graph = GetGraph(args);
+        string metricsStr = Arg(args, "metrics");
+        var metrics = metricsStr.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        int topN = int.TryParse(OptArg(args, "top_n"), out int n) ? n : 20;
+
+        var bridgeNodes = GraphAnalytics.FindCrossRankNodes(graph, metrics, topN);
+
+        var nodes = new JsonArray();
+        var provider = new NodeColorProvider();
+        provider.SetGraph(graph);
+
+        foreach (int i in bridgeNodes)
+        {
+            var node = new JsonObject
+            {
+                ["index"] = i,
+                ["label"] = graph.Labels[i],
+                ["community"] = graph.Community[i],
+            };
+            foreach (var m in metrics)
+            {
+                double[] vals = provider.ComputeNodeMetric(m);
+                node[m] = Math.Round(vals[i], 6);
+            }
+            nodes.Add(node);
+        }
+
+        return new JsonObject
+        {
+            ["metrics"] = JsonSerializer.SerializeToNode(metrics),
+            ["top_n"] = topN,
+            ["bridge_count"] = bridgeNodes.Length,
+            ["nodes"] = nodes,
+        }.ToJsonString();
+    }
+
+    private string GraphNeighbors(JsonNode? args)
+    {
+        var graph = GetGraph(args);
+        int nodeIdx = int.Parse(Arg(args, "node"));
+
+        if (nodeIdx < 0 || nodeIdx >= graph.NodeCount)
+            return $"Node index {nodeIdx} out of range [0, {graph.NodeCount})";
+
+        var neighbors = GraphAnalytics.GetNeighbors(graph, nodeIdx);
+        var list = new JsonArray();
+        foreach (var nb in neighbors)
+        {
+            list.Add(new JsonObject
+            {
+                ["index"] = nb.Index,
+                ["label"] = nb.Label,
+                ["community"] = nb.Community,
+                ["degree"] = nb.Degree,
+            });
+        }
+
+        return new JsonObject
+        {
+            ["node"] = nodeIdx,
+            ["label"] = graph.Labels[nodeIdx],
+            ["neighbor_count"] = neighbors.Length,
+            ["neighbors"] = list,
+        }.ToJsonString();
+    }
+
+    private string GraphNodeProfile(JsonNode? args)
+    {
+        var graph = GetGraph(args);
+        int nodeIdx = int.Parse(Arg(args, "node"));
+
+        if (nodeIdx < 0 || nodeIdx >= graph.NodeCount)
+            return $"Node index {nodeIdx} out of range [0, {graph.NodeCount})";
+
+        var profile = GraphAnalytics.NodeProfile(graph, nodeIdx);
+        var obj = new JsonObject();
+        foreach (var (key, value) in profile)
+        {
+            if (value is int iv) obj[key] = iv;
+            else if (value is double dv) obj[key] = dv;
+            else obj[key] = value.ToString();
+        }
+        obj["neighbor_count"] = graph.Neighbors(nodeIdx).Length;
+
+        return obj.ToJsonString();
+    }
+
+    private string GraphFft(JsonNode? args)
+    {
+        var graph = GetGraph(args);
+        string metric = Arg(args, "metric");
+        int maxPeaks = int.TryParse(OptArg(args, "max_peaks"), out int mp) ? mp : 10;
+
+        var provider = new NodeColorProvider();
+        provider.SetGraph(graph);
+        double[] values = provider.ComputeNodeMetric(metric);
+
+        var spectrum = GraphAnalytics.ComputeSpectrum(values, sortFirst: true);
+        var peaks = GraphAnalytics.FindDominantFrequencies(spectrum, threshold: 0.1, maxPeaks: maxPeaks);
+
+        var peakArr = new JsonArray();
+        foreach (var (idx, freq, mag) in peaks)
+        {
+            peakArr.Add(new JsonObject
+            {
+                ["index"] = idx,
+                ["frequency"] = Math.Round(freq, 6),
+                ["magnitude"] = Math.Round(mag, 6),
+                ["period"] = freq > 0 ? Math.Round(1.0 / freq, 2) : double.PositiveInfinity,
+            });
+        }
+
+        return new JsonObject
+        {
+            ["metric"] = metric,
+            ["signal_length"] = values.Length,
+            ["fft_length"] = spectrum.Frequencies.Length,
+            ["dominant_peaks"] = peakArr,
+            ["interpretation"] = peaks.Length > 0
+                ? $"Found {peaks.Length} dominant frequencies — suggests periodic structure in {metric} distribution."
+                : $"No dominant frequencies found — {metric} distribution appears smooth/monotonic.",
+        }.ToJsonString();
+    }
+
+    private string GraphShow(JsonNode? args)
+    {
+        var graph = GetGraph(args);
+        var win = GetWindow(args);
+
+        // Run layout
+        var hierarchy = RunLayout(graph, 300, 0.05, "auto", false, "1:1");
+
+        InvokeOnUI(() =>
+        {
+            if (hierarchy != null)
+            {
+                if (win.UseSkia)
+                    win.SkiaView.SetGraphWithHierarchy(graph, hierarchy);
+                else
+                    win.GraphView.SetGraphWithHierarchy(graph, hierarchy);
+            }
+            else
+            {
+                if (win.UseSkia)
+                    win.SkiaView.SetGraph(graph);
+                else
+                    win.GraphView.SetGraph(graph);
+            }
+
+            var c = CountCommunities(graph);
+            string renderer = win.UseSkia ? "Skia" : "GDI+";
+            win.SetStatus(
+                $"◇  {graph.Title}  —  {graph.NodeCount} nodes, " +
+                $"{graph.EdgeCount} edges, {c} communities" +
+                (hierarchy != null ? $", {hierarchy.LevelCount} levels" : "") +
+                $"  [{renderer}]");
+        });
+
+        return new JsonObject
+        {
+            ["window"] = win.WindowId,
+            ["title"] = graph.Title,
+            ["nodes"] = graph.NodeCount,
+            ["edges"] = graph.EdgeCount,
+            ["status"] = "displayed",
+        }.ToJsonString();
+    }
+
+    // -----------------------------------------------------------------------
     // Process control
     // -----------------------------------------------------------------------
 
@@ -1955,25 +2480,43 @@ public class McpServer
             ?? throw new ArgumentException($"Missing argument: {name}");
     }
 
+    private static string? NodeToString(JsonNode? node)
+    {
+        if (node == null) return null;
+        if (node is JsonValue jv)
+        {
+            if (jv.TryGetValue<string>(out var s)) return s;
+            // Handle numbers, booleans sent as non-string JSON types
+            return jv.ToJsonString();
+        }
+        return node.ToJsonString();
+    }
+
     private static string? OptArg(JsonNode? args, string name)
     {
-        return args?[name]?.GetValue<string>();
+        return NodeToString(args?[name]);
     }
 
     private static string ArgOr(JsonNode? args, string name, string fallback)
     {
-        return args?[name]?.GetValue<string>() ?? fallback;
+        return NodeToString(args?[name]) ?? fallback;
     }
 
     private static int IntArg(JsonNode? args, string name, int fallback)
     {
-        var s = args?[name]?.GetValue<string>();
+        var node = args?[name];
+        if (node == null) return fallback;
+        if (node is JsonValue jv && jv.TryGetValue<int>(out var i)) return i;
+        var s = NodeToString(node);
         return s != null && int.TryParse(s, out var v) ? v : fallback;
     }
 
     private static double DoubleArg(JsonNode? args, string name, double fallback)
     {
-        var s = args?[name]?.GetValue<string>();
+        var node = args?[name];
+        if (node == null) return fallback;
+        if (node is JsonValue jv && jv.TryGetValue<double>(out var d)) return d;
+        var s = NodeToString(node);
         return s != null && double.TryParse(s,
             System.Globalization.CultureInfo.InvariantCulture, out var v)
             ? v : fallback;
