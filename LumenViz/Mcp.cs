@@ -805,7 +805,9 @@ public class McpServer
         var win = GetWindow(args);
         return InvokeOnUI(() =>
         {
-            var stats = win.GraphView.GetRenderStats();
+            var stats = win.UseSkia
+                ? win.SkiaView.GetRenderStats()
+                : win.GraphView.GetRenderStats();
             return System.Text.Json.JsonSerializer.Serialize(stats,
                 new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
         });
@@ -816,8 +818,16 @@ public class McpServer
         var win = GetWindow(args);
         return InvokeOnUI(() =>
         {
-            win.GraphView.ResetRenderStats();
-            win.GraphView.Invalidate(); // trigger fresh paint
+            if (win.UseSkia)
+            {
+                win.SkiaView.ResetRenderStats();
+                win.SkiaView.Invalidate();
+            }
+            else
+            {
+                win.GraphView.ResetRenderStats();
+                win.GraphView.Invalidate();
+            }
             return "Render stats reset. Next paint will start fresh EMA.";
         });
     }
@@ -830,6 +840,18 @@ public class McpServer
 
         return InvokeOnUI(() =>
         {
+            // Handle renderer switch first (applies at window level)
+            if (option == "renderer")
+            {
+                bool skia = value.Equals("skia", StringComparison.OrdinalIgnoreCase);
+                bool gdi = value.Equals("gdi", StringComparison.OrdinalIgnoreCase)
+                    || value.Equals("gdi+", StringComparison.OrdinalIgnoreCase);
+                if (!skia && !gdi)
+                    return $"Invalid renderer: {value}. Use 'skia' or 'gdi'.";
+                win.SetRenderer(skia);
+                return $"Switched to {(skia ? "Skia" : "GDI+")} renderer.";
+            }
+
             var gv = win.GraphView;
             bool boolVal = value.Equals("true", StringComparison.OrdinalIgnoreCase)
                 || value == "1" || value.Equals("yes", StringComparison.OrdinalIgnoreCase);
@@ -856,8 +878,29 @@ public class McpServer
                     return $"Unknown option: {option}";
             }
 
+            // Apply the same setting to the Skia view too
+            var sv = win.SkiaView;
+            switch (option)
+            {
+                case "anti_alias": sv.AntiAlias = boolVal; break;
+                case "show_edges": sv.ShowEdges = boolVal; break;
+                case "show_nodes": sv.ShowNodes = boolVal; break;
+                case "show_outlines": sv.ShowOutlines = boolVal; break;
+                case "show_labels": sv.ShowLabels = boolVal; break;
+                case "show_minimap": sv.ShowMinimap = boolVal; break;
+                case "show_levels_panel": sv.ShowLevelsPanel = boolVal; break;
+                case "show_parent_highlight": sv.ShowParentHighlight = boolVal; break;
+                case "show_off_screen_indicators": sv.ShowOffScreenIndicators = boolVal; break;
+                case "show_selection_glow": sv.ShowSelectionGlow = boolVal; break;
+                case "lod_mode":
+                    sv.LodMode = value;
+                    break;
+            }
+
             gv.ResetRenderStats(); // fresh stats after changing a setting
+            sv.ResetRenderStats();
             gv.Invalidate();
+            sv.Invalidate();
             return $"Set {option}={value}";
         });
     }
@@ -897,15 +940,23 @@ public class McpServer
         InvokeOnUI(() =>
         {
             if (hierarchy != null)
+            {
                 win.GraphView.SetGraphWithHierarchy(graph, hierarchy);
+                win.SkiaView.SetGraphWithHierarchy(graph, hierarchy);
+            }
             else
+            {
                 win.GraphView.SetGraph(graph);
+                win.SkiaView.SetGraph(graph);
+            }
 
             var c = CountCommunities(graph);
+            string renderer = win.UseSkia ? "Skia" : "GDI+";
             win.SetStatus(
                 $"◇  {graph.Title}  —  {graph.NodeCount} nodes, " +
                 $"{graph.EdgeCount} edges, {c} communities" +
-                (hierarchy != null ? $", {hierarchy.LevelCount} levels" : ""));
+                (hierarchy != null ? $", {hierarchy.LevelCount} levels" : "") +
+                $"  [{renderer}]");
         });
 
         var communities = CountCommunities(graph);

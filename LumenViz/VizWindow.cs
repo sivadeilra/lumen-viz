@@ -12,6 +12,8 @@ public class VizWindow : Form
 {
     private readonly string _windowId;
     private readonly GraphView _graphView;
+    private readonly SkiaGraphView _skiaView;
+    private bool _useSkia;
     private readonly StatusStrip _statusBar;
     private readonly ToolStripStatusLabel _statusLabel;
     private readonly MenuStrip _menuStrip;
@@ -27,6 +29,8 @@ public class VizWindow : Form
 
     public string WindowId => _windowId;
     public GraphView GraphView => _graphView;
+    public SkiaGraphView SkiaView => _skiaView;
+    public bool UseSkia => _useSkia;
 
     public VizWindow(string id, string title, int width, int height)
     {
@@ -42,10 +46,13 @@ public class VizWindow : Form
 
         // ── Graph view (fills the window) ───────────────────────────────
         _graphView = new GraphView { Dock = DockStyle.Fill };
+        _skiaView = new SkiaGraphView { Dock = DockStyle.Fill, Visible = false };
 
         // Wire level-change events so we update the status bar
         _graphView.LevelChanged += OnLevelChanged;
         _graphView.SelectionChanged += OnSelectionChanged;
+        _skiaView.LevelChanged += OnLevelChanged;
+        _skiaView.SelectionChanged += OnSelectionChanged;
 
         // ── Status bar ──────────────────────────────────────────────────
         _statusBar = new StatusStrip();
@@ -57,6 +64,7 @@ public class VizWindow : Form
         ClientSize = new Size(width, height);
         MainMenuStrip = _menuStrip;
         Controls.Add(_graphView);    // Dock.Fill — behind everything
+        Controls.Add(_skiaView);     // Skia view (hidden initially)
         Controls.Add(_menuStrip);
         Controls.Add(_statusBar);
         StartPosition = FormStartPosition.CenterScreen;
@@ -64,6 +72,8 @@ public class VizWindow : Form
         // ── Wire up interaction tracking ────────────────────────────────
         _graphView.MouseClick += OnGraphClick;
         _graphView.MouseDoubleClick += OnGraphDoubleClick;
+        _skiaView.MouseClick += OnGraphClick;
+        _skiaView.MouseDoubleClick += OnGraphDoubleClick;
         KeyPreview = true;
         KeyDown += OnWindowKeyDown;
         Resize += OnWindowResize;
@@ -72,25 +82,79 @@ public class VizWindow : Form
 
     public void SetStatus(string text) => _statusLabel.Text = text;
 
+    /// <summary>Switch between GDI+ and Skia renderer. Transfers graph state.</summary>
+    public void SetRenderer(bool useSkia)
+    {
+        if (_useSkia == useSkia) return;
+        _useSkia = useSkia;
+
+        // Transfer graph/hierarchy from old renderer to new
+        if (useSkia)
+        {
+            var g = _graphView.GetGraph();
+            var h = _graphView.GetHierarchy();
+            if (g != null && h != null)
+                _skiaView.SetGraphWithHierarchy(g, h);
+            else if (g != null)
+                _skiaView.SetGraph(g);
+
+            _graphView.Visible = false;
+            _skiaView.Visible = true;
+            _skiaView.Focus();
+        }
+        else
+        {
+            var g = _skiaView.GetGraph();
+            var h = _skiaView.GetHierarchy();
+            if (g != null && h != null)
+                _graphView.SetGraphWithHierarchy(g, h);
+            else if (g != null)
+                _graphView.SetGraph(g);
+
+            _skiaView.Visible = false;
+            _graphView.Visible = true;
+            _graphView.Focus();
+        }
+
+        UpdateStatusFromGraph();
+    }
+
     /// <summary>Update status bar to reflect current graph/level/selection state.</summary>
     private void UpdateStatusFromGraph()
     {
-        var graph = _graphView.GetGraph();
-        if (graph == null) return;
+        GraphModel? graph;
+        CoarseningHierarchy? hierarchy;
+        int currentLevel, selCount;
 
-        string status = $"◇  {graph.Title}  —  {graph.NodeCount}n, {graph.EdgeCount}e";
-
-        var hierarchy = _graphView.GetHierarchy();
-        if (hierarchy != null && hierarchy.LevelCount > 1)
+        if (_useSkia)
         {
-            int lvl = _graphView.CurrentLevel;
-            status += $"  |  Level {lvl}/{hierarchy.LevelCount - 1}";
-            if (lvl == 0) status += " (finest)";
-            else if (lvl == hierarchy.LevelCount - 1) status += " (coarsest)";
+            graph = _skiaView.GetGraph();
+            hierarchy = _skiaView.GetHierarchy();
+            currentLevel = _skiaView.CurrentLevel;
+            selCount = _skiaView.Selection.Count;
+        }
+        else
+        {
+            graph = _graphView.GetGraph();
+            hierarchy = _graphView.GetHierarchy();
+            currentLevel = _graphView.CurrentLevel;
+            selCount = _graphView.Selection.Count;
         }
 
-        if (_graphView.Selection.Count > 0)
-            status += $"  |  {_graphView.Selection.Count} selected";
+        if (graph == null) return;
+
+        string renderer = _useSkia ? "Skia" : "GDI+";
+        string status = $"◇  {graph.Title}  —  {graph.NodeCount}n, {graph.EdgeCount}e  [{renderer}]";
+
+        if (hierarchy != null && hierarchy.LevelCount > 1)
+        {
+            status += $"  |  Level {currentLevel}/{hierarchy.LevelCount - 1}";
+            if (currentLevel == 0) status += " (finest)";
+            else if (currentLevel == hierarchy.LevelCount - 1) status += " (coarsest)";
+        }
+
+        if (selCount > 0)
+            status += $"  |  {selCount} selected";
 
         _statusLabel.Text = status;
     }
@@ -169,6 +233,14 @@ public class VizWindow : Form
 
     private void OnWindowKeyDown(object? sender, KeyEventArgs e)
     {
+        // 'S' key toggles between GDI+ and Skia renderer
+        if (e.KeyCode == Keys.S && e.Modifiers == Keys.None)
+        {
+            SetRenderer(!_useSkia);
+            e.Handled = true;
+            return;
+        }
+
         // Navigation keys handled by GraphView.OnKeyDown directly.
         // Don't double-report those as interaction events.
         if (e.KeyCode is Keys.PageUp or Keys.PageDown or Keys.Home or Keys.End
