@@ -7,6 +7,9 @@ namespace LumenViz;
 /// Attractive forces pull connected nodes together (spring).
 /// A cooling schedule gradually reduces displacement, converging
 /// to a stable layout.
+///
+/// Operates directly on GraphModel's parallel arrays (NodeX, NodeY)
+/// for cache-friendly, allocation-free iteration.
 /// </summary>
 public class ForceLayout
 {
@@ -31,10 +34,12 @@ public class ForceLayout
     /// </summary>
     public void Randomize()
     {
-        foreach (var node in _graph.Nodes)
+        var px = _graph.NodeX;
+        var py = _graph.NodeY;
+        for (int i = 0; i < _graph.NodeCount; i++)
         {
-            node.X = _rng.NextDouble() * Width;
-            node.Y = _rng.NextDouble() * Height;
+            px[i] = _rng.NextDouble() * Width;
+            py[i] = _rng.NextDouble() * Height;
         }
     }
 
@@ -43,15 +48,23 @@ public class ForceLayout
     /// </summary>
     public void Run()
     {
-        int n = _graph.Nodes.Count;
+        int n = _graph.NodeCount;
         if (n == 0) return;
 
         double area = Width * Height;
         double k = Math.Sqrt(area / n);   // optimal edge length
         double k2 = k * k;
 
+        // Alias the position arrays for tight inner loops
+        var px = _graph.NodeX;
+        var py = _graph.NodeY;
+
         // Initialize random positions if not already set
-        bool allZero = _graph.Nodes.All(nd => nd.X == 0 && nd.Y == 0);
+        bool allZero = true;
+        for (int i = 0; i < n; i++)
+        {
+            if (px[i] != 0 || py[i] != 0) { allZero = false; break; }
+        }
         if (allZero) Randomize();
 
         double[] dx = new double[n];
@@ -66,15 +79,14 @@ public class ForceLayout
             Array.Clear(dy);
 
             // ── Repulsive forces (all pairs) ───────────────────────────
-            // For large graphs (>500 nodes), use a grid-based approximation
             if (n <= 500)
             {
                 for (int i = 0; i < n; i++)
                 {
                     for (int j = i + 1; j < n; j++)
                     {
-                        double deltaX = _graph.Nodes[i].X - _graph.Nodes[j].X;
-                        double deltaY = _graph.Nodes[i].Y - _graph.Nodes[j].Y;
+                        double deltaX = px[i] - px[j];
+                        double deltaY = py[i] - py[j];
                         double dist2 = deltaX * deltaX + deltaY * deltaY;
                         if (dist2 < 0.01) dist2 = 0.01;
                         double dist = Math.Sqrt(dist2);
@@ -83,27 +95,24 @@ public class ForceLayout
                         double fx = (deltaX / dist) * force;
                         double fy = (deltaY / dist) * force;
 
-                        dx[i] += fx;
-                        dy[i] += fy;
-                        dx[j] -= fx;
-                        dy[j] -= fy;
+                        dx[i] += fx; dy[i] += fy;
+                        dx[j] -= fx; dy[j] -= fy;
                     }
                 }
             }
             else
             {
-                // Barnes-Hut–style approximation: repel from center of mass
-                // For simplicity, use grid-based bucketing
                 RepulsiveApprox(k2, dx, dy);
             }
 
             // ── Attractive forces (edges) ──────────────────────────────
-            foreach (var edge in _graph.Edges)
+            var es = _graph.EdgeSource;
+            var et = _graph.EdgeTarget;
+            for (int e = 0; e < _graph.EdgeCount; e++)
             {
-                var ni = _graph.Nodes[edge.Source];
-                var nj = _graph.Nodes[edge.Target];
-                double deltaX = ni.X - nj.X;
-                double deltaY = ni.Y - nj.Y;
+                int si = es[e], ti = et[e];
+                double deltaX = px[si] - px[ti];
+                double deltaY = py[si] - py[ti];
                 double dist = Math.Sqrt(deltaX * deltaX + deltaY * deltaY);
                 if (dist < 0.01) dist = 0.01;
 
@@ -111,10 +120,8 @@ public class ForceLayout
                 double fx = (deltaX / dist) * force;
                 double fy = (deltaY / dist) * force;
 
-                dx[edge.Source] -= fx;
-                dy[edge.Source] -= fy;
-                dx[edge.Target] += fx;
-                dy[edge.Target] += fy;
+                dx[si] -= fx; dy[si] -= fy;
+                dx[ti] += fx; dy[ti] += fy;
             }
 
             // ── Gravity toward center ──────────────────────────────────
@@ -122,8 +129,8 @@ public class ForceLayout
             double cy = Height / 2.0;
             for (int i = 0; i < n; i++)
             {
-                double deltaX = _graph.Nodes[i].X - cx;
-                double deltaY = _graph.Nodes[i].Y - cy;
+                double deltaX = px[i] - cx;
+                double deltaY = py[i] - cy;
                 double dist = Math.Sqrt(deltaX * deltaX + deltaY * deltaY);
                 if (dist > 0.01)
                 {
@@ -139,13 +146,13 @@ public class ForceLayout
                 if (disp > 0.01)
                 {
                     double scale = Math.Min(disp, temp) / disp;
-                    _graph.Nodes[i].X += dx[i] * scale;
-                    _graph.Nodes[i].Y += dy[i] * scale;
+                    px[i] += dx[i] * scale;
+                    py[i] += dy[i] * scale;
                 }
 
                 // Keep within bounds (soft constraint)
-                _graph.Nodes[i].X = Math.Clamp(_graph.Nodes[i].X, 10, Width - 10);
-                _graph.Nodes[i].Y = Math.Clamp(_graph.Nodes[i].Y, 10, Height - 10);
+                px[i] = Math.Clamp(px[i], 10, Width - 10);
+                py[i] = Math.Clamp(py[i], 10, Height - 10);
             }
 
             temp -= cooling;
@@ -155,61 +162,105 @@ public class ForceLayout
 
     /// <summary>
     /// Grid-based repulsive force approximation for large graphs.
-    /// Nodes farther than 2k apart contribute negligible repulsion.
+    /// Reuses a single flat array for grid cells instead of
+    /// Dictionary{(int,int), List{int}} — eliminates ~N*iter allocations.
     /// </summary>
     private void RepulsiveApprox(double k2, double[] dx, double[] dy)
     {
-        int n = _graph.Nodes.Count;
+        int n = _graph.NodeCount;
         double k = Math.Sqrt(k2);
         double cutoff = k * 3;
         double cellSize = cutoff;
 
-        // Build spatial grid
-        var grid = new Dictionary<(int, int), List<int>>();
+        var px = _graph.NodeX;
+        var py = _graph.NodeY;
+
+        // Compute grid bounds
+        double minX = double.MaxValue, minY = double.MaxValue;
+        double maxX = double.MinValue, maxY = double.MinValue;
         for (int i = 0; i < n; i++)
         {
-            int gx = (int)(_graph.Nodes[i].X / cellSize);
-            int gy = (int)(_graph.Nodes[i].Y / cellSize);
-            var key = (gx, gy);
-            if (!grid.TryGetValue(key, out var list))
-            {
-                list = new List<int>();
-                grid[key] = list;
-            }
-            list.Add(i);
+            if (px[i] < minX) minX = px[i];
+            if (py[i] < minY) minY = py[i];
+            if (px[i] > maxX) maxX = px[i];
+            if (py[i] > maxY) maxY = py[i];
         }
 
-        // For each node, only check neighboring cells
-        foreach (var (cell, members) in grid)
+        int gridW = Math.Max(1, (int)((maxX - minX) / cellSize) + 2);
+        int gridH = Math.Max(1, (int)((maxY - minY) / cellSize) + 2);
+        int totalCells = gridW * gridH;
+
+        // Count nodes per cell
+        var cellCount = new int[totalCells];
+        var nodeCell = new int[n]; // which cell each node belongs to
+
+        for (int i = 0; i < n; i++)
         {
-            for (int ci = cell.Item1 - 1; ci <= cell.Item1 + 1; ci++)
+            int gx = Math.Clamp((int)((px[i] - minX) / cellSize), 0, gridW - 1);
+            int gy = Math.Clamp((int)((py[i] - minY) / cellSize), 0, gridH - 1);
+            int cell = gy * gridW + gx;
+            nodeCell[i] = cell;
+            cellCount[cell]++;
+        }
+
+        // Build cell offsets (prefix sum) and cell member list
+        var cellOffset = new int[totalCells + 1];
+        for (int c = 0; c < totalCells; c++)
+            cellOffset[c + 1] = cellOffset[c] + cellCount[c];
+
+        var cellMembers = new int[n];
+        var cursor = new int[totalCells];
+        Array.Copy(cellOffset, cursor, totalCells);
+        for (int i = 0; i < n; i++)
+            cellMembers[cursor[nodeCell[i]]++] = i;
+
+        // For each cell, check neighboring cells
+        for (int cy2 = 0; cy2 < gridH; cy2++)
+        {
+            for (int cx2 = 0; cx2 < gridW; cx2++)
             {
-                for (int cj = cell.Item2 - 1; cj <= cell.Item2 + 1; cj++)
+                int cellA = cy2 * gridW + cx2;
+                int startA = cellOffset[cellA];
+                int endA = cellOffset[cellA + 1];
+                if (startA == endA) continue;
+
+                for (int ny = cy2 - 1; ny <= cy2 + 1; ny++)
                 {
-                    if (!grid.TryGetValue((ci, cj), out var neighbors)) continue;
-
-                    foreach (int i in members)
+                    if (ny < 0 || ny >= gridH) continue;
+                    for (int nx = cx2 - 1; nx <= cx2 + 1; nx++)
                     {
-                        foreach (int j in neighbors)
+                        if (nx < 0 || nx >= gridW) continue;
+                        int cellB = ny * gridW + nx;
+                        int startB = cellOffset[cellB];
+                        int endB = cellOffset[cellB + 1];
+                        if (startB == endB) continue;
+
+                        // Same cell: only do i < j pairs
+                        bool sameCell = (cellA == cellB);
+
+                        for (int ai = startA; ai < endA; ai++)
                         {
-                            if (j <= i) continue;
+                            int i = cellMembers[ai];
+                            int jStart = sameCell ? ai + 1 : startB;
+                            for (int bi = jStart; bi < endB; bi++)
+                            {
+                                int j = cellMembers[bi];
 
-                            double deltaX = _graph.Nodes[i].X - _graph.Nodes[j].X;
-                            double deltaY = _graph.Nodes[i].Y - _graph.Nodes[j].Y;
-                            double dist2 = deltaX * deltaX + deltaY * deltaY;
-                            if (dist2 < 0.01) dist2 = 0.01;
-                            double dist = Math.Sqrt(dist2);
+                                double deltaX = px[i] - px[j];
+                                double deltaY = py[i] - py[j];
+                                double dist2 = deltaX * deltaX + deltaY * deltaY;
+                                if (dist2 < 0.01) dist2 = 0.01;
+                                double dist = Math.Sqrt(dist2);
 
-                            if (dist > cutoff) continue;
+                                if (dist > cutoff) continue;
 
-                            double force = k2 / dist;
-                            double fx = (deltaX / dist) * force;
-                            double fy = (deltaY / dist) * force;
+                                double force = k2 / dist;
+                                double fx = (deltaX / dist) * force;
+                                double fy = (deltaY / dist) * force;
 
-                            dx[i] += fx;
-                            dy[i] += fy;
-                            dx[j] -= fx;
-                            dy[j] -= fy;
+                                dx[i] += fx; dy[i] += fy;
+                                dx[j] -= fx; dy[j] -= fy;
+                            }
                         }
                     }
                 }

@@ -60,13 +60,14 @@ public static class MatrixMarketReader
 
         // We treat the matrix as a graph.  rows == cols for square matrices.
         int nodeCount = Math.Max(rows, cols);
-        for (int i = 0; i < nodeCount; i++)
-            graph.AddNode();
+        graph.AllocNodes(nodeCount);
 
         // ── Parse entries ───────────────────────────────────────────────
-        // Track which edges we've added to avoid duplicates when matrix
-        // is symmetric and also has both (i,j) and (j,i) listed.
+        // First pass: collect into temporary lists, dedup, then write arrays
         var edgeSet = new HashSet<(int, int)>();
+        var tmpSrc = new List<int>(nnz);
+        var tmpTgt = new List<int>(nnz);
+        var tmpWgt = new List<double>(nnz);
 
         for (int k = 0; k < nnz; k++)
         {
@@ -90,9 +91,17 @@ public static class MatrixMarketReader
 
             if (edgeSet.Add((lo, hi)))
             {
-                graph.AddEdge(lo, hi, weight);
+                tmpSrc.Add(lo);
+                tmpTgt.Add(hi);
+                tmpWgt.Add(weight);
             }
         }
+
+        // Write into flat arrays
+        graph.AllocEdges(tmpSrc.Count);
+        tmpSrc.CopyTo(graph.EdgeSource);
+        tmpTgt.CopyTo(graph.EdgeTarget);
+        tmpWgt.CopyTo(graph.EdgeWeight);
 
         graph.BuildAdjacency();
         return graph;

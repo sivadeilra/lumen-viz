@@ -94,7 +94,7 @@ public class VizWindow : Form
 
     private void OnGraphClick(object? sender, MouseEventArgs e)
     {
-        var node = HitTestNode(e.Location);
+        int nodeIdx = HitTestNode(e.Location);
         var ev = new JsonObject
         {
             ["type"] = "click",
@@ -102,28 +102,30 @@ public class VizWindow : Form
             ["x"] = e.X,
             ["y"] = e.Y,
         };
-        if (node != null)
+        if (nodeIdx >= 0)
         {
-            ev["node_index"] = node.Index;
-            ev["node_label"] = node.Label;
-            ev["node_community"] = node.Community;
+            var graph = _graphView.GetGraph()!;
+            ev["node_index"] = nodeIdx;
+            ev["node_label"] = graph.Labels[nodeIdx];
+            ev["node_community"] = graph.Community[nodeIdx];
         }
         EnqueueEvent(ev);
     }
 
     private void OnGraphDoubleClick(object? sender, MouseEventArgs e)
     {
-        var node = HitTestNode(e.Location);
+        int nodeIdx = HitTestNode(e.Location);
         var ev = new JsonObject
         {
             ["type"] = "double_click",
             ["x"] = e.X,
             ["y"] = e.Y,
         };
-        if (node != null)
+        if (nodeIdx >= 0)
         {
-            ev["node_index"] = node.Index;
-            ev["node_label"] = node.Label;
+            var graph = _graphView.GetGraph()!;
+            ev["node_index"] = nodeIdx;
+            ev["node_label"] = graph.Labels[nodeIdx];
         }
         EnqueueEvent(ev);
     }
@@ -159,29 +161,30 @@ public class VizWindow : Form
 
     // ── Node hit testing ────────────────────────────────────────────────
 
-    private GraphNode? HitTestNode(Point screenPoint)
+    /// <summary>Returns node index, or -1 if no node hit.</summary>
+    private int HitTestNode(Point screenPoint)
     {
         var graph = _graphView.GetGraph();
-        if (graph == null) return null;
+        if (graph == null) return -1;
 
         float bestDist = float.MaxValue;
-        GraphNode? bestNode = null;
+        int bestNode = -1;
 
-        foreach (var node in graph.Nodes)
+        for (int i = 0; i < graph.NodeCount; i++)
         {
-            var pt = _graphView.WorldToScreen(node);
+            var pt = _graphView.WorldToScreenNode(i);
             float dx = screenPoint.X - pt.X;
             float dy = screenPoint.Y - pt.Y;
             float dist = dx * dx + dy * dy;
 
             float radius = _graphView.NodeRadius +
-                Math.Min(node.Neighbors.Count * 0.3f, 6f);
+                Math.Min(graph.Degree[i] * 0.3f, 6f);
             float hitRadius = radius + 4; // generous click target
 
             if (dist < hitRadius * hitRadius && dist < bestDist)
             {
                 bestDist = dist;
-                bestNode = node;
+                bestNode = i;
             }
         }
 

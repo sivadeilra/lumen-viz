@@ -456,10 +456,9 @@ public class McpServer
             if (graph != null)
             {
                 info["graph_title"] = graph.Title;
-                info["graph_nodes"] = graph.Nodes.Count;
-                info["graph_edges"] = graph.Edges.Count;
-                info["graph_communities"] =
-                    graph.Nodes.Select(n => n.Community).Distinct().Count();
+                info["graph_nodes"] = graph.NodeCount;
+                info["graph_edges"] = graph.EdgeCount;
+                info["graph_communities"] = CountCommunities(graph);
             }
             return info.ToJsonString();
         });
@@ -529,19 +528,19 @@ public class McpServer
         InvokeOnUI(() =>
         {
             win.GraphView.SetGraph(graph);
-            var c = graph.Nodes.Select(n => n.Community).Distinct().Count();
+            var c = CountCommunities(graph);
             win.SetStatus(
-                $"◇  {graph.Title}  —  {graph.Nodes.Count} nodes, " +
-                $"{graph.Edges.Count} edges, {c} communities");
+                $"◇  {graph.Title}  —  {graph.NodeCount} nodes, " +
+                $"{graph.EdgeCount} edges, {c} communities");
         });
 
-        var communities = graph.Nodes.Select(n => n.Community).Distinct().Count();
+        var communities = CountCommunities(graph);
         return new JsonObject
         {
             ["window"] = win.WindowId,
             ["title"] = graph.Title,
-            ["nodes"] = graph.Nodes.Count,
-            ["edges"] = graph.Edges.Count,
+            ["nodes"] = graph.NodeCount,
+            ["edges"] = graph.EdgeCount,
             ["communities"] = communities,
             ["status"] = "loaded and displayed",
         }.ToJsonString();
@@ -557,10 +556,9 @@ public class McpServer
             return new JsonObject
             {
                 ["title"] = graph.Title,
-                ["nodes"] = graph.Nodes.Count,
-                ["edges"] = graph.Edges.Count,
-                ["communities"] =
-                    graph.Nodes.Select(n => n.Community).Distinct().Count(),
+                ["nodes"] = graph.NodeCount,
+                ["edges"] = graph.EdgeCount,
+                ["communities"] = CountCommunities(graph),
             }.ToJsonString();
         });
     }
@@ -687,7 +685,32 @@ public class McpServer
         var winId = Arg(args, "window");
         if (_windows.TryGetValue(winId, out var win))
             return win;
-        throw new ArgumentException($"Window not found: {winId}");
+
+        // Auto-create: if the window doesn't exist, create it on the fly.
+        // This makes all tools self-sufficient — no separate create_window
+        // call needed (especially useful when tool discovery has limits).
+        Log($"    Auto-creating window {winId}");
+        VizWindow? created = null;
+        InvokeOnUI(() =>
+        {
+            created = new VizWindow(winId, "Lumen Viz  ◇", 1280, 800);
+            created.WindowClosed += OnWindowClosed;
+            _windows[winId] = created;
+            created.Show();
+        });
+        return created ?? throw new InvalidOperationException(
+            $"Failed to create window: {winId}");
+    }
+
+    /// <summary>
+    /// Count distinct community IDs without LINQ allocation.
+    /// </summary>
+    private static int CountCommunities(GraphModel graph)
+    {
+        var seen = new HashSet<int>();
+        for (int i = 0; i < graph.NodeCount; i++)
+            seen.Add(graph.Community[i]);
+        return seen.Count;
     }
 
     // -----------------------------------------------------------------------

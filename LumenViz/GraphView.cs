@@ -78,17 +78,20 @@ public class GraphView : Control
     /// </summary>
     public void AutoFit()
     {
-        if (_graph == null || _graph.Nodes.Count == 0) return;
+        if (_graph == null || _graph.NodeCount == 0) return;
 
+        int n = _graph.NodeCount;
+        var px = _graph.NodeX;
+        var py = _graph.NodeY;
         double minX = double.MaxValue, minY = double.MaxValue;
         double maxX = double.MinValue, maxY = double.MinValue;
 
-        foreach (var node in _graph.Nodes)
+        for (int i = 0; i < n; i++)
         {
-            if (node.X < minX) minX = node.X;
-            if (node.Y < minY) minY = node.Y;
-            if (node.X > maxX) maxX = node.X;
-            if (node.Y > maxY) maxY = node.Y;
+            if (px[i] < minX) minX = px[i];
+            if (py[i] < minY) minY = py[i];
+            if (px[i] > maxX) maxX = px[i];
+            if (py[i] > maxY) maxY = py[i];
         }
 
         double graphW = maxX - minX;
@@ -116,7 +119,7 @@ public class GraphView : Control
         var g = e.Graphics;
         g.Clear(BackgroundColor);
 
-        if (_graph == null || _graph.Nodes.Count == 0)
+        if (_graph == null || _graph.NodeCount == 0)
         {
             DrawPlaceholder(g);
             return;
@@ -128,32 +131,43 @@ public class GraphView : Control
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         }
 
+        int n = _graph.NodeCount;
+        var px = _graph.NodeX;
+        var py = _graph.NodeY;
+        var degree = _graph.Degree;
+
         // ── Draw edges ─────────────────────────────────────────────────
         int edgeAlpha = Math.Clamp((int)(EdgeAlpha * 255), 10, 255);
         using var edgePen = new Pen(Color.FromArgb(edgeAlpha, 120, 130, 150), 1f);
 
-        foreach (var edge in _graph.Edges)
+        var es = _graph.EdgeSource;
+        var et = _graph.EdgeTarget;
+        for (int ei = 0; ei < _graph.EdgeCount; ei++)
         {
-            var a = WorldToScreen(_graph.Nodes[edge.Source]);
-            var b = WorldToScreen(_graph.Nodes[edge.Target]);
+            var a = WorldToScreen(px[es[ei]], py[es[ei]]);
+            var b = WorldToScreen(px[et[ei]], py[et[ei]]);
             g.DrawLine(edgePen, a, b);
         }
+
+        // ── Pre-cache palette brushes ──────────────────────────────────
+        var paletteBrushes = new SolidBrush[Palette.Length];
+        for (int pi = 0; pi < Palette.Length; pi++)
+            paletteBrushes[pi] = new SolidBrush(Palette[pi]);
 
         // ── Draw nodes ─────────────────────────────────────────────────
         float r = NodeRadius;
         using var outlinePen = new Pen(Color.FromArgb(200, 255, 255, 255), 1f);
 
-        foreach (var node in _graph.Nodes)
+        var community = _graph.Community;
+        for (int i = 0; i < n; i++)
         {
-            var pt = WorldToScreen(node);
-            var color = Palette[node.Community % Palette.Length];
+            var pt = WorldToScreen(px[i], py[i]);
+            float nr = r + Math.Min(degree[i] * 0.3f, 6f);
 
-            // Scale radius slightly by degree for visual weight
-            float nr = r + Math.Min(node.Neighbors.Count * 0.3f, 6f);
-
-            using var brush = new SolidBrush(color);
-            g.FillEllipse(brush, pt.X - nr, pt.Y - nr, nr * 2, nr * 2);
-            g.DrawEllipse(outlinePen, pt.X - nr, pt.Y - nr, nr * 2, nr * 2);
+            g.FillEllipse(paletteBrushes[community[i] % Palette.Length],
+                pt.X - nr, pt.Y - nr, nr * 2, nr * 2);
+            g.DrawEllipse(outlinePen,
+                pt.X - nr, pt.Y - nr, nr * 2, nr * 2);
         }
 
         // ── Draw labels ────────────────────────────────────────────────
@@ -162,13 +176,17 @@ public class GraphView : Control
             using var font = new Font("Segoe UI", 8f);
             using var labelBrush = new SolidBrush(Color.FromArgb(200, 220, 220, 230));
 
-            foreach (var node in _graph.Nodes)
+            var labels = _graph.Labels;
+            for (int i = 0; i < n; i++)
             {
-                var pt = WorldToScreen(node);
-                float nr = r + Math.Min(node.Neighbors.Count * 0.3f, 6f);
-                g.DrawString(node.Label, font, labelBrush, pt.X + nr + 2, pt.Y - 6);
+                var pt = WorldToScreen(px[i], py[i]);
+                float nr = r + Math.Min(degree[i] * 0.3f, 6f);
+                g.DrawString(labels[i], font, labelBrush, pt.X + nr + 2, pt.Y - 6);
             }
         }
+
+        // Dispose palette brushes
+        foreach (var brush in paletteBrushes) brush.Dispose();
 
         // ── HUD ────────────────────────────────────────────────────────
         DrawHud(g);
@@ -189,7 +207,7 @@ public class GraphView : Control
     {
         if (_graph == null) return;
 
-        string info = $"{_graph.Title}  —  {_graph.Nodes.Count} nodes, {_graph.Edges.Count} edges";
+        string info = $"{_graph.Title}  —  {_graph.NodeCount} nodes, {_graph.EdgeCount} edges";
         using var font = new Font("Cascadia Mono", 9f);
         using var brush = new SolidBrush(Color.FromArgb(160, 200, 200, 220));
         g.DrawString(info, font, brush, 8, Height - 24);
@@ -197,11 +215,19 @@ public class GraphView : Control
 
     // ── Coordinate transforms ───────────────────────────────────────────
 
-    public PointF WorldToScreen(GraphNode node)
+    /// <summary>Convert world coordinates to screen coordinates.</summary>
+    public PointF WorldToScreen(double wx, double wy)
     {
         return new PointF(
-            (float)(node.X * _zoom + _pan.X),
-            (float)(node.Y * _zoom + _pan.Y));
+            (float)(wx * _zoom + _pan.X),
+            (float)(wy * _zoom + _pan.Y));
+    }
+
+    /// <summary>Convert world coordinates for node i to screen.</summary>
+    public PointF WorldToScreenNode(int i)
+    {
+        if (_graph == null) return PointF.Empty;
+        return WorldToScreen(_graph.NodeX[i], _graph.NodeY[i]);
     }
 
     // ── Mouse interaction: pan & zoom ───────────────────────────────────

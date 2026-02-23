@@ -1,103 +1,179 @@
 namespace LumenViz;
 
 /// <summary>
-/// Lightweight graph data model — nodes with 2D positions, edges with
-/// optional weights. Designed for sparse graph visualization.
+/// High-performance graph data model using parallel arrays and CSR
+/// (Compressed Sparse Row) adjacency. Zero per-node/per-edge heap
+/// allocations — everything lives in flat arrays.
+///
+/// Memory layout for a graph with N nodes and M edges:
+///   NodeX[N], NodeY[N]      — positions (double[])
+///   Community[N]            — community assignment (int[])
+///   Degree[N]               — neighbor count (int[])
+///   Labels[N]               — display labels (string[], lazy)
+///   EdgeSource[M]           — edge endpoints (int[])
+///   EdgeTarget[M]           — edge endpoints (int[])
+///   EdgeWeight[M]           — edge weights (double[])
+///   AdjOffset[N+1]          — CSR row pointers (int[])
+///   AdjList[2*M]            — CSR column indices (int[])
 /// </summary>
-public class GraphModel
+public sealed class GraphModel
 {
-    public List<GraphNode> Nodes { get; } = new();
-    public List<GraphEdge> Edges { get; } = new();
+    // ── Node data (parallel arrays, indexed by node ID 0..N-1) ──────
+    public int NodeCount { get; private set; }
+    public double[] NodeX = Array.Empty<double>();
+    public double[] NodeY = Array.Empty<double>();
+    public int[] Community = Array.Empty<int>();
+    public int[] Degree = Array.Empty<int>();
+    public string[] Labels = Array.Empty<string>();
+
+    // ── Edge data (parallel arrays, indexed by edge ID 0..M-1) ──────
+    public int EdgeCount { get; private set; }
+    public int[] EdgeSource = Array.Empty<int>();
+    public int[] EdgeTarget = Array.Empty<int>();
+    public double[] EdgeWeight = Array.Empty<double>();
+
+    // ── CSR adjacency (built by BuildAdjacency) ─────────────────────
+    /// <summary>AdjOffset[i]..AdjOffset[i+1] spans the neighbors of node i.</summary>
+    public int[] AdjOffset = Array.Empty<int>();
+    /// <summary>Flat neighbor list — use AdjOffset to slice per node.</summary>
+    public int[] AdjList = Array.Empty<int>();
+
     public string Title { get; set; } = "";
 
-    public GraphNode AddNode(string? label = null)
-    {
-        var node = new GraphNode
-        {
-            Index = Nodes.Count,
-            Label = label ?? Nodes.Count.ToString(),
-        };
-        Nodes.Add(node);
-        return node;
-    }
+    /// <summary>
+    /// Get the neighbors of node i as a span. Zero allocations.
+    /// </summary>
+    public ReadOnlySpan<int> Neighbors(int i)
+        => AdjList.AsSpan(AdjOffset[i], AdjOffset[i + 1] - AdjOffset[i]);
 
-    public GraphEdge AddEdge(int source, int target, double weight = 1.0)
+    // ── Builder methods (used during loading) ───────────────────────
+
+    /// <summary>
+    /// Allocate storage for N nodes with default labels "0".."N-1".
+    /// </summary>
+    public void AllocNodes(int count)
     {
-        var edge = new GraphEdge
-        {
-            Source = source,
-            Target = target,
-            Weight = weight,
-        };
-        Edges.Add(edge);
-        return edge;
+        NodeCount = count;
+        NodeX = new double[count];
+        NodeY = new double[count];
+        Community = new int[count];
+        Degree = new int[count];
+        Labels = new string[count];
+        for (int i = 0; i < count; i++)
+            Labels[i] = i.ToString();
     }
 
     /// <summary>
-    /// Build adjacency lists from the edge list, for fast neighbor traversal.
-    /// Call this after all edges have been added.
+    /// Allocate storage for M edges.
+    /// </summary>
+    public void AllocEdges(int count)
+    {
+        EdgeCount = count;
+        EdgeSource = new int[count];
+        EdgeTarget = new int[count];
+        EdgeWeight = new double[count];
+        Array.Fill(EdgeWeight, 1.0);
+    }
+
+    /// <summary>
+    /// Build CSR adjacency from edge arrays. Also computes Degree[].
+    /// Call this after all edges have been set.
     /// </summary>
     public void BuildAdjacency()
     {
-        foreach (var node in Nodes)
-            node.Neighbors.Clear();
+        int n = NodeCount;
+        int m = EdgeCount;
 
-        foreach (var edge in Edges)
+        // Count degree of each node
+        Array.Clear(Degree, 0, n);
+        for (int e = 0; e < m; e++)
         {
-            Nodes[edge.Source].Neighbors.Add(edge.Target);
-            Nodes[edge.Target].Neighbors.Add(edge.Source);
+            Degree[EdgeSource[e]]++;
+            Degree[EdgeTarget[e]]++;
+        }
+
+        // Build offset array (prefix sum)
+        AdjOffset = new int[n + 1];
+        for (int i = 0; i < n; i++)
+            AdjOffset[i + 1] = AdjOffset[i] + Degree[i];
+
+        // Fill adjacency list
+        AdjList = new int[AdjOffset[n]]; // = 2 * M
+        var cursor = new int[n];
+        Array.Copy(AdjOffset, cursor, n);
+
+        for (int e = 0; e < m; e++)
+        {
+            int s = EdgeSource[e];
+            int t = EdgeTarget[e];
+            AdjList[cursor[s]++] = t;
+            AdjList[cursor[t]++] = s;
         }
     }
 
     /// <summary>
-    /// Assign a community/group index to each node using a greedy modularity
-    /// algorithm (label propagation). Simple but effective for visualization
-    /// coloring.
+    /// Assign communities using label propagation. Uses array-based
+    /// counting to avoid Dictionary allocations per node per iteration.
     /// </summary>
     public void DetectCommunities()
     {
-        // Initialize each node in its own community
-        foreach (var node in Nodes)
-            node.Community = node.Index;
+        int n = NodeCount;
+        if (n == 0) return;
 
-        // Label propagation: repeatedly adopt the most common neighbor label
+        // Initialize each node in its own community
+        for (int i = 0; i < n; i++)
+            Community[i] = i;
+
         var rng = new Random(42);
-        var order = Enumerable.Range(0, Nodes.Count).ToArray();
+        var order = new int[n];
+        for (int i = 0; i < n; i++) order[i] = i;
+
+        // Reusable scratch arrays — zero allocation per iteration
+        var labelCount = new int[n];
+        var labelsSeen = new int[n];
+        int labelSeenCount = 0;
 
         for (int iter = 0; iter < 50; iter++)
         {
             bool changed = false;
             rng.Shuffle(order);
 
-            foreach (int i in order)
+            for (int oi = 0; oi < n; oi++)
             {
-                var node = Nodes[i];
-                if (node.Neighbors.Count == 0) continue;
+                int i = order[oi];
+                var neighbors = Neighbors(i);
+                if (neighbors.Length == 0) continue;
 
-                // Count neighbor communities
-                var counts = new Dictionary<int, int>();
-                foreach (int nb in node.Neighbors)
+                // Count neighbor communities using scratch arrays
+                labelSeenCount = 0;
+                foreach (int nb in neighbors)
                 {
-                    var c = Nodes[nb].Community;
-                    counts.TryGetValue(c, out int count);
-                    counts[c] = count + 1;
+                    int c = Community[nb];
+                    if (labelCount[c] == 0)
+                        labelsSeen[labelSeenCount++] = c;
+                    labelCount[c]++;
                 }
 
-                // Pick the most common
-                int bestLabel = node.Community;
+                // Find the most common label
+                int bestLabel = Community[i];
                 int bestCount = 0;
-                foreach (var (label, count) in counts)
+                for (int li = 0; li < labelSeenCount; li++)
                 {
-                    if (count > bestCount)
+                    int lbl = labelsSeen[li];
+                    if (labelCount[lbl] > bestCount)
                     {
-                        bestCount = count;
-                        bestLabel = label;
+                        bestCount = labelCount[lbl];
+                        bestLabel = lbl;
                     }
                 }
 
-                if (bestLabel != node.Community)
+                // Clear only the slots we used
+                for (int li = 0; li < labelSeenCount; li++)
+                    labelCount[labelsSeen[li]] = 0;
+
+                if (bestLabel != Community[i])
                 {
-                    node.Community = bestLabel;
+                    Community[i] = bestLabel;
                     changed = true;
                 }
             }
@@ -105,30 +181,16 @@ public class GraphModel
             if (!changed) break;
         }
 
-        // Renumber communities to 0..K-1
-        var communityMap = new Dictionary<int, int>();
-        foreach (var node in Nodes)
+        // Renumber communities to 0..K-1 using an array (no Dictionary)
+        var communityMap = new int[n];
+        Array.Fill(communityMap, -1);
+        int nextId = 0;
+        for (int i = 0; i < n; i++)
         {
-            if (!communityMap.ContainsKey(node.Community))
-                communityMap[node.Community] = communityMap.Count;
-            node.Community = communityMap[node.Community];
+            int c = Community[i];
+            if (communityMap[c] < 0)
+                communityMap[c] = nextId++;
+            Community[i] = communityMap[c];
         }
     }
-}
-
-public class GraphNode
-{
-    public int Index { get; set; }
-    public string Label { get; set; } = "";
-    public double X { get; set; }
-    public double Y { get; set; }
-    public int Community { get; set; }
-    public List<int> Neighbors { get; } = new();
-}
-
-public class GraphEdge
-{
-    public int Source { get; set; }
-    public int Target { get; set; }
-    public double Weight { get; set; } = 1.0;
 }
