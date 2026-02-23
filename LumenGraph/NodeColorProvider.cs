@@ -149,6 +149,250 @@ public sealed class NodeColorProvider
     }
 
     // ════════════════════════════════════════════════════════════════════
+    // Raw metric computation (returns double[] for analysis/selection)
+    // ════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Compute raw metric values for all nodes. Returns double[N] where
+    /// higher = "more" of the metric. Useful for top-N queries.
+    /// </summary>
+    public double[] ComputeNodeMetric(string metric)
+    {
+        if (_graph == null) return Array.Empty<double>();
+        return metric switch
+        {
+            "degree" => MetricDegree(),
+            "indegree" => MetricInDegree(),
+            "outdegree" => MetricOutDegree(),
+            "pagerank" => MetricPageRank(),
+            "betweenness" => MetricBetweenness(),
+            "clustering" => MetricClustering(),
+            "kcore" => MetricKCore(),
+            "in_out_ratio" => MetricInOutRatio(),
+            "reciprocity" => MetricReciprocity(),
+            _ => throw new ArgumentException($"Unknown metric: {metric}"),
+        };
+    }
+
+    private double[] MetricDegree()
+    {
+        var g = _graph!;
+        var vals = new double[g.NodeCount];
+        for (int i = 0; i < g.NodeCount; i++) vals[i] = g.Degree[i];
+        return vals;
+    }
+
+    private double[] MetricInDegree()
+    {
+        var g = _graph!;
+        int n = g.NodeCount;
+        var vals = new double[n];
+        if (!g.IsDirected) return MetricDegree();
+        for (int e = 0; e < g.EdgeCount; e++) vals[g.EdgeTarget[e]]++;
+        return vals;
+    }
+
+    private double[] MetricOutDegree()
+    {
+        var g = _graph!;
+        int n = g.NodeCount;
+        var vals = new double[n];
+        if (!g.IsDirected) return MetricDegree();
+        for (int e = 0; e < g.EdgeCount; e++) vals[g.EdgeSource[e]]++;
+        return vals;
+    }
+
+    private double[] MetricPageRank()
+    {
+        var g = _graph!;
+        int n = g.NodeCount;
+        if (!g.IsDirected) return MetricDegree();
+
+        var outDeg = new int[n];
+        for (int e = 0; e < g.EdgeCount; e++) outDeg[g.EdgeSource[e]]++;
+
+        const double d = 0.85;
+        double init = 1.0 / n;
+        var rank = new double[n];
+        var next = new double[n];
+        Array.Fill(rank, init);
+
+        for (int iter = 0; iter < 20; iter++)
+        {
+            double leak = 0;
+            for (int i = 0; i < n; i++) if (outDeg[i] == 0) leak += rank[i];
+            double base_val = (1.0 - d + d * leak) / n;
+            Array.Fill(next, base_val);
+            for (int e = 0; e < g.EdgeCount; e++)
+                next[g.EdgeTarget[e]] += d * rank[g.EdgeSource[e]] / outDeg[g.EdgeSource[e]];
+            (rank, next) = (next, rank);
+        }
+        return rank;
+    }
+
+    private double[] MetricBetweenness()
+    {
+        var g = _graph!;
+        int n = g.NodeCount;
+        var bc = new double[n];
+        int sampleLimit = n > 5000 ? 500 : n;
+        int step = Math.Max(1, n / sampleLimit);
+
+        var stack = new List<int>(n);
+        var pred = new List<int>[n];
+        for (int i = 0; i < n; i++) pred[i] = new List<int>();
+        var sigma = new double[n];
+        var dist = new int[n];
+        var delta = new double[n];
+        var queue = new Queue<int>(n);
+
+        for (int s = 0; s < n; s += step)
+        {
+            stack.Clear();
+            for (int i = 0; i < n; i++) { pred[i].Clear(); sigma[i] = 0; dist[i] = -1; delta[i] = 0; }
+            sigma[s] = 1; dist[s] = 0;
+            queue.Clear(); queue.Enqueue(s);
+            while (queue.Count > 0)
+            {
+                int v = queue.Dequeue(); stack.Add(v);
+                var neighbors = g.Neighbors(v);
+                for (int ni = 0; ni < neighbors.Length; ni++)
+                {
+                    int w = neighbors[ni];
+                    if (dist[w] < 0) { dist[w] = dist[v] + 1; queue.Enqueue(w); }
+                    if (dist[w] == dist[v] + 1) { sigma[w] += sigma[v]; pred[w].Add(v); }
+                }
+            }
+            for (int i = stack.Count - 1; i >= 0; i--)
+            {
+                int w = stack[i];
+                foreach (int v in pred[w]) delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w]);
+                if (w != s) bc[w] += delta[w];
+            }
+        }
+        return bc;
+    }
+
+    private double[] MetricClustering()
+    {
+        var g = _graph!;
+        int n = g.NodeCount;
+        var cc = new double[n];
+        for (int i = 0; i < n; i++)
+        {
+            var nb = g.Neighbors(i);
+            int k = nb.Length;
+            if (k < 2) continue;
+            int triangles = 0;
+            for (int a = 0; a < k; a++)
+            {
+                int u = nb[a];
+                var uNb = g.Neighbors(u);
+                for (int b = a + 1; b < k; b++)
+                {
+                    int v = nb[b];
+                    for (int c = 0; c < uNb.Length; c++)
+                        if (uNb[c] == v) { triangles++; break; }
+                }
+            }
+            cc[i] = 2.0 * triangles / (k * (k - 1));
+        }
+        return cc;
+    }
+
+    private double[] MetricKCore()
+    {
+        var g = _graph!;
+        int n = g.NodeCount;
+        var deg = new int[n];
+        for (int i = 0; i < n; i++) deg[i] = g.Degree[i];
+        int maxDeg = 0;
+        for (int i = 0; i < n; i++) if (deg[i] > maxDeg) maxDeg = deg[i];
+        if (maxDeg == 0) return new double[n];
+
+        var bin = new int[maxDeg + 1];
+        for (int i = 0; i < n; i++) bin[deg[i]]++;
+        int start = 0;
+        for (int d2 = 0; d2 <= maxDeg; d2++) { int tmp = bin[d2]; bin[d2] = start; start += tmp; }
+        var order = new int[n];
+        var pos = new int[n];
+        for (int i = 0; i < n; i++) { pos[i] = bin[deg[i]]; order[pos[i]] = i; bin[deg[i]]++; }
+        for (int d2 = maxDeg; d2 > 0; d2--) bin[d2] = bin[d2 - 1];
+        bin[0] = 0;
+
+        var core = new double[n];
+        for (int i = 0; i < n; i++)
+        {
+            int v = order[i]; core[v] = deg[v];
+            var nb = g.Neighbors(v);
+            for (int j = 0; j < nb.Length; j++)
+            {
+                int u = nb[j];
+                if (deg[u] > deg[v])
+                {
+                    int du = deg[u]; int pu = pos[u]; int pw = bin[du]; int w = order[pw];
+                    order[pu] = w; order[pw] = u; pos[u] = pw; pos[w] = pu;
+                    bin[du]++; deg[u]--;
+                }
+            }
+        }
+        return core;
+    }
+
+    private double[] MetricInOutRatio()
+    {
+        var g = _graph!;
+        int n = g.NodeCount;
+        var vals = new double[n];
+        if (!g.IsDirected) return vals;
+        var inDeg = new int[n];
+        var outDeg = new int[n];
+        for (int e = 0; e < g.EdgeCount; e++) { outDeg[g.EdgeSource[e]]++; inDeg[g.EdgeTarget[e]]++; }
+        for (int i = 0; i < n; i++)
+        {
+            int total = inDeg[i] + outDeg[i];
+            vals[i] = total == 0 ? 0 : (double)(outDeg[i] - inDeg[i]) / total;
+        }
+        return vals;
+    }
+
+    /// <summary>
+    /// Per-node reciprocity: fraction of a node's edges that are reciprocated.
+    /// </summary>
+    private double[] MetricReciprocity()
+    {
+        var g = _graph!;
+        int n = g.NodeCount;
+        var vals = new double[n];
+        if (!g.IsDirected) { Array.Fill(vals, 1.0); return vals; }
+
+        var edgeSet = new HashSet<long>(g.EdgeCount);
+        for (int e = 0; e < g.EdgeCount; e++)
+            edgeSet.Add(EdgeKey(g.EdgeSource[e], g.EdgeTarget[e]));
+
+        // Count per-node: how many of their out-edges are mutual
+        var outCount = new int[n];
+        var mutualCount = new int[n];
+        for (int e = 0; e < g.EdgeCount; e++)
+        {
+            int src = g.EdgeSource[e], tgt = g.EdgeTarget[e];
+            outCount[src]++;
+            if (edgeSet.Contains(EdgeKey(tgt, src)))
+                mutualCount[src]++;
+        }
+        for (int i = 0; i < n; i++)
+            vals[i] = outCount[i] == 0 ? 0 : (double)mutualCount[i] / outCount[i];
+        return vals;
+    }
+
+    /// <summary>Known metric names for select_top_nodes.</summary>
+    public static readonly string[] MetricNames =
+    {
+        "degree", "indegree", "outdegree", "pagerank", "betweenness",
+        "clustering", "kcore", "in_out_ratio", "reciprocity",
+    };
+
+    // ════════════════════════════════════════════════════════════════════
     // Node color computations
     // ════════════════════════════════════════════════════════════════════
 

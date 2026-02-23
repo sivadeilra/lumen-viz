@@ -610,6 +610,16 @@ public class GraphView : Control
         }
     }
 
+    public void SetSelection(IEnumerable<int> indices)
+    {
+        _selection.Clear();
+        int max = _graph?.NodeCount ?? 0;
+        foreach (int i in indices)
+            if (i >= 0 && i < max) _selection.Add(i);
+        SelectionChanged?.Invoke();
+        Invalidate();
+    }
+
     public void SelectAll()
     {
         if (_graph == null) return;

@@ -131,6 +131,7 @@ public class McpServer
                     ["capabilities"] = new JsonObject
                     {
                         ["tools"] = new JsonObject(),
+                        ["prompts"] = new JsonObject(),
                     },
                     ["serverInfo"] = new JsonObject
                     {
@@ -152,6 +153,17 @@ public class McpServer
 
             case "tools/call":
                 HandleToolCall(id, msg["params"]);
+                break;
+
+            case "prompts/list":
+                SendResult(id, new JsonObject
+                {
+                    ["prompts"] = BuildPromptList(),
+                });
+                break;
+
+            case "prompts/get":
+                HandlePromptGet(id, msg["params"]);
                 break;
 
             default:
@@ -358,6 +370,29 @@ public class McpServer
                 "Returns a list of window IDs with their selection counts.",
                 Props()),
 
+            ToolDef("clear_selection",
+                "Clear the node selection in a window.",
+                PropsReq(("window", "string", "Window ID"))),
+
+            ToolDef("set_selection",
+                "Set the selected nodes by index. Replaces any existing selection.",
+                Props(
+                    ("window", "string", "Window ID", true),
+                    ("indices", "string", "Comma-separated node indices (e.g. '0,5,12,99')", true))),
+
+            ToolDef("select_top_nodes",
+                "Select the top N nodes by a graph metric. " +
+                "Metrics: degree, indegree, outdegree, pagerank, betweenness, " +
+                "clustering, kcore, in_out_ratio, reciprocity. " +
+                "Use order=asc for bottom-N (lowest metric). " +
+                "Returns the selected node labels and metric values.",
+                Props(
+                    ("window", "string", "Window ID", true),
+                    ("metric", "string", "Metric name (e.g. 'pagerank')", true),
+                    ("count", "string", "Number of nodes to select (default 20)", false),
+                    ("order", "string", "Sort order: desc (default, highest first) or asc", false),
+                    ("community", "string", "Restrict to nodes in this community (integer)", false))),
+
             // ── Coarsening levels ──────────────────────────────────────
             ToolDef("get_coarse_levels",
                 "Get info about all coarsening levels for a window's graph. " +
@@ -415,6 +450,356 @@ public class McpServer
                 "Get the current node and edge color mode for a window.",
                 PropsReq(("window", "string", "Window ID"))),
         };
+    }
+
+    // -----------------------------------------------------------------------
+    // Prompt definitions
+    // -----------------------------------------------------------------------
+
+    private static JsonArray BuildPromptList()
+    {
+        return new JsonArray
+        {
+            PromptDef("getting-started",
+                "Essential first-use workflow for LumenViz. Covers discovering data files, " +
+                "creating windows, loading graphs, and basic visual tuning. Start here.",
+                ("graph_file", "string", false,
+                    "Optional path to a graph file. If omitted, prompt will suggest using list_data_files.")),
+
+            PromptDef("analyze-network",
+                "Step-by-step pattern for investigating a graph's structure: compute metrics, " +
+                "find important nodes, cross-reference rankings, and highlight discoveries.",
+                ("metric", "string", false,
+                    "Primary metric to analyze (pagerank, betweenness, degree, kcore, clustering). Default: pagerank.")),
+
+            PromptDef("color-modes-guide",
+                "Reference for all 7 node color modes and 5 edge color modes. Explains what each " +
+                "mode reveals and which combinations work best for different graph types."),
+
+            PromptDef("performance-tuning",
+                "Guide for optimizing rendering performance on large graphs. Covers renderer " +
+                "selection (Skia vs GDI+), LOD modes, render stats, and visual toggles."),
+
+            PromptDef("multi-level-exploration",
+                "How to use the hierarchical coarsening system to explore graphs at multiple " +
+                "scales. Navigate between coarse overviews and full-detail views."),
+        };
+    }
+
+    private static JsonObject PromptDef(string name, string description,
+        params (string name, string type, bool required, string description)[] arguments)
+    {
+        var prompt = new JsonObject
+        {
+            ["name"] = name,
+            ["description"] = description,
+        };
+        if (arguments.Length > 0)
+        {
+            var args = new JsonArray();
+            foreach (var (aName, aType, aRequired, aDesc) in arguments)
+            {
+                args.Add(new JsonObject
+                {
+                    ["name"] = aName,
+                    ["description"] = aDesc,
+                    ["required"] = aRequired,
+                });
+            }
+            prompt["arguments"] = args;
+        }
+        return prompt;
+    }
+
+    // -----------------------------------------------------------------------
+    // Prompt dispatch
+    // -----------------------------------------------------------------------
+
+    private void HandlePromptGet(JsonNode? id, JsonNode? parameters)
+    {
+        var promptName = parameters?["name"]?.GetValue<string>();
+        if (promptName == null)
+        {
+            SendError(id, -32602, "Missing prompt name");
+            return;
+        }
+
+        var args = parameters?["arguments"];
+        string? content = promptName switch
+        {
+            "getting-started" => PromptGettingStarted(args),
+            "analyze-network" => PromptAnalyzeNetwork(args),
+            "color-modes-guide" => PromptColorModesGuide(),
+            "performance-tuning" => PromptPerformanceTuning(),
+            "multi-level-exploration" => PromptMultiLevelExploration(),
+            _ => null,
+        };
+
+        if (content == null)
+        {
+            SendError(id, -32602, $"Unknown prompt: {promptName}");
+            return;
+        }
+
+        SendResult(id, new JsonObject
+        {
+            ["description"] = $"Prompt: {promptName}",
+            ["messages"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["role"] = "user",
+                    ["content"] = new JsonObject
+                    {
+                        ["type"] = "text",
+                        ["text"] = content,
+                    },
+                },
+            },
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Prompt content
+    // -----------------------------------------------------------------------
+
+    private static string PromptGettingStarted(JsonNode? args)
+    {
+        var file = args?["graph_file"]?.GetValue<string>();
+        var fileHint = file != null
+            ? $"Load the graph file: {file}"
+            : "First, call `list_data_files` to see available graphs. Pick one to load.";
+
+        return $"""
+            You are controlling LumenViz, a graph visualization application, via MCP tools.
+
+            ## Quick-start workflow
+
+            1. **Discover data**: {fileHint}
+               Available formats: edge list (.txt), GML (.gml), GraphML (.graphml), Matrix Market (.mtx).
+
+            2. **Create a window and load a graph**:
+               - Call `load_graph` with `window` (any ID like "win1") and `path` (full file path).
+               - The window auto-creates if it doesn't exist. No need to call `create_window` separately.
+               - The graph will be laid out automatically (force-directed with Barnes-Hut optimization).
+
+            3. **Adjust the view**:
+               - `auto_fit` — zoom to fit all nodes in the viewport.
+               - `set_edge_alpha` — lower to 0.05–0.15 for dense graphs so structure is visible.
+               - `set_node_radius` — default is good for most graphs; increase for small graphs (<100 nodes).
+               - `set_show_labels` — turn on for small graphs, off for large ones.
+
+            4. **Explore the graph**:
+               - `get_graph_info` — node/edge counts, community count, directed/undirected.
+               - `set_color_mode` — try `node_mode=community` to see cluster structure.
+               - `select_top_nodes` — highlight important nodes by any metric.
+               - `get_coarse_levels` — see if multi-level hierarchy is available for zoom.
+
+            ## Tips
+            - Window IDs are arbitrary strings. Use "win1", "win2", etc.
+            - Most tools return JSON with detailed results — parse them for follow-up decisions.
+            - For graphs >1000 nodes, reduce edge alpha to 0.05–0.1 and consider `set_render_option` with `lod_mode=auto`.
+            - The `load_graph_with_layout` tool gives fine control over layout: iterations, gravity, bounded mode, aspect ratio.
+            - Use `arrange_windows` to tile multiple windows across the screen.
+            """;
+    }
+
+    private static string PromptAnalyzeNetwork(JsonNode? args)
+    {
+        var metric = args?["metric"]?.GetValue<string>() ?? "pagerank";
+        return $"""
+            You are performing network analysis on a graph loaded in LumenViz.
+
+            ## Analysis workflow
+
+            ### Step 1: Understand the graph
+            Call `get_graph_info` to learn:
+            - Node and edge counts
+            - Whether the graph is directed (affects which metrics are meaningful)
+            - Number of communities detected
+
+            ### Step 2: Rank nodes by metrics
+            Use `select_top_nodes` to find important nodes. Start with `metric={metric}`.
+
+            Available metrics (and what they reveal):
+            - **pagerank** — Global influence/authority. Best first metric for directed graphs.
+            - **betweenness** — Bridge nodes that control information flow between communities.
+            - **degree** — Simple connectivity. High degree = hub nodes.
+            - **kcore** — Coreness: how deeply embedded in the dense core of the network.
+            - **clustering** — Local clustering coefficient. High = tightly-knit neighborhoods.
+            - **in_out_ratio** — (Directed only) Ratio of in-degree to total degree. High = authority, Low = hub.
+            - **indegree** / **outdegree** — (Directed only) Incoming vs outgoing connections.
+            - **reciprocity** — (Directed only) Fraction of edges that are reciprocated.
+
+            ### Step 3: Cross-reference metrics to find "power brokers"
+            The most interesting nodes often rank high on MULTIPLE metrics simultaneously.
+            For example, nodes that rank in both top-20 PageRank AND top-20 Betweenness are
+            "power brokers" — they are both influential and structurally critical.
+
+            Strategy:
+            1. `select_top_nodes` with metric=pagerank, count=20 → note the node indices
+            2. `select_top_nodes` with metric=betweenness, count=20 → note the node indices
+            3. Find the intersection — nodes appearing in both lists
+            4. `set_selection` with just those overlapping indices to highlight them
+            5. Use `set_color_mode` with node_mode=community to see which communities they belong to
+
+            ### Step 4: Visualize with color modes
+            - `set_color_mode node_mode=pagerank` — color gradient shows influence distribution
+            - `set_color_mode node_mode=betweenness` — highlights bridge nodes
+            - `set_color_mode edge_mode=bridge` — colors inter-community edges differently
+
+            ### Step 5: Community-scoped analysis
+            Use the `community` parameter of `select_top_nodes` to find leaders within a specific community:
+            `select_top_nodes metric=pagerank count=5 community=3`
+
+            ## Tips for directed graphs
+            - in_out_ratio is uniquely informative: values near 1.0 = pure authority, near 0.0 = pure hub
+            - reciprocity reveals mutual relationships vs one-way flows
+            - Use edge_mode=reciprocity to visualize this
+            """;
+    }
+
+    private static string PromptColorModesGuide()
+    {
+        return """
+            ## LumenViz Color Mode Reference
+
+            Color modes are set with `set_color_mode` and queried with `get_color_mode`.
+            You can set node_mode and edge_mode independently. Changes animate smoothly.
+
+            ### Node Color Modes (7 available)
+
+            | Mode | What it shows | Best for |
+            |------|--------------|----------|
+            | `community` | Louvain community membership. Each community gets a distinct hue. | Default first view. See cluster structure. |
+            | `degree` | Total connections (in+out). Gradient: dark blue (low) → bright yellow (high). | Finding hubs in any graph. |
+            | `in_out_ratio` | Ratio of in-degree to total degree. Blue=hub (mostly out), Red=authority (mostly in). | Directed graphs only. Reveals information flow direction. |
+            | `betweenness` | Betweenness centrality. Hot gradient: cool (low) → red (high). | Finding bridges and gatekeepers between communities. |
+            | `pagerank` | PageRank score. Purple (low) → orange/yellow (high). | Identifying globally important nodes in directed graphs. |
+            | `clustering` | Local clustering coefficient. Low (dark) → high (bright green). | Finding tightly-knit cliques vs loosely connected nodes. |
+            | `kcore` | K-core number. Deeper core = brighter. | Seeing the "onion layers" of network density. |
+
+            ### Edge Color Modes (5 available)
+
+            | Mode | What it shows | Best for |
+            |------|--------------|----------|
+            | `uniform` | All edges same semi-transparent color. | Clean, uncluttered view. Default. |
+            | `community` | Same color as source node's community. Inter-community edges are gray. | Seeing community boundaries. |
+            | `weight` | Edge weight gradient (if weighted). | Weighted networks. |
+            | `reciprocity` | Reciprocated edges (both A→B and B→A exist) highlighted. | Directed graphs: mutual vs one-way relationships. |
+            | `bridge` | Edges crossing community boundaries highlighted in distinct color. | Finding inter-community connections. |
+
+            ### Recommended combinations
+
+            - **First look**: node=community, edge=uniform — see the community structure clearly
+            - **Hub analysis**: node=degree, edge=community — find hubs and their community context
+            - **Bridge detection**: node=betweenness, edge=bridge — see gatekeepers and their cross-community edges
+            - **Directed flow**: node=in_out_ratio, edge=reciprocity — understand information flow patterns
+            - **Influence map**: node=pagerank, edge=community — see where power concentrates
+            - **Dense core**: node=kcore, edge=uniform — reveal the hierarchical core structure
+
+            ### Notes
+            - Color transitions animate over ~330ms (smoothstep interpolation).
+            - Modes that depend on direction (in_out_ratio, reciprocity) degrade gracefully on undirected graphs but are less meaningful.
+            - betweenness is O(n*m) — may take a moment on large graphs (>5000 nodes).
+            """;
+    }
+
+    private static string PromptPerformanceTuning()
+    {
+        return """
+            ## LumenViz Performance Tuning Guide
+
+            ### Monitoring performance
+            - `get_render_stats` — returns frame time (EMA), node/edge counts rendered, LOD state.
+            - `reset_render_stats` — clear accumulated stats for a fresh measurement window.
+            - Check `get_window_info` for render stats embedded in the window info response.
+
+            ### Renderer selection
+            LumenViz has two renderers:
+            - **GDI+** — Windows native. Good compatibility. Adequate for <2000 nodes.
+            - **Skia** — GPU-accelerated via SkiaSharp. ~3× faster. Preferred for large graphs.
+
+            Switch with: `set_render_option option=renderer value=skia` (or `gdi`).
+
+            ### LOD (Level of Detail) modes
+            `set_render_option option=lod_mode value=<mode>`
+            - **auto** — Automatically reduces detail during interaction (pan/zoom). Best default.
+            - **low** — Always low detail. Fastest for huge graphs.
+            - **high** — Always full detail. Use for screenshots or small graphs.
+
+            ### Visual toggles that affect performance
+            These can be toggled via `set_render_option`:
+            | Option | Default | Performance impact |
+            |--------|---------|-------------------|
+            | `show_edges` | true | **Major** — edges dominate render time on dense graphs. |
+            | `show_labels` | varies | Moderate — text rendering is expensive for many nodes. |
+            | `show_minimap` | true | Minor — renders a scaled-down copy. |
+            | `show_outlines` | true | Minor — additional stroke pass per node. |
+            | `anti_alias` | true | Moderate — smoother but slower. |
+            | `show_selection_glow` | true | Minor — gaussian glow on selected nodes. |
+
+            ### Quick recipe for large graphs (>5000 nodes)
+            1. Use Skia renderer: `set_render_option option=renderer value=skia`
+            2. Lower edge alpha: `set_edge_alpha alpha=0.05`
+            3. Use auto LOD: `set_render_option option=lod_mode value=auto`
+            4. Consider hiding labels: `set_render_option option=show_labels value=false`
+            5. If still slow, hide edges during exploration: `set_render_option option=show_edges value=false`
+
+            ### Multi-level as a performance strategy
+            For very large graphs, the coarsening hierarchy gives you a natural performance escape:
+            - `set_coarse_level level=2` — view a coarser representation with fewer nodes.
+            - Navigate at the coarse level, then drill down to level 0 for the area of interest.
+            """;
+    }
+
+    private static string PromptMultiLevelExploration()
+    {
+        return """
+            ## Multi-Level Graph Exploration in LumenViz
+
+            LumenViz uses Hierarchical Edge Merging (HEM) to build a coarsening hierarchy
+            when a graph is loaded. This creates multiple levels of abstraction:
+            - **Level 0** — the original full-detail graph.
+            - **Level 1, 2, ...** — progressively coarser views where groups of nodes are merged.
+
+            ### Checking available levels
+            `get_coarse_levels` returns:
+            - Number of levels and node/edge counts at each level.
+            - Memory usage per level.
+            - Which level is currently displayed.
+
+            Graphs with >200 nodes automatically get multi-level layout ("auto" mode).
+            Use `load_graph_with_layout layout=multilevel` to force it on smaller graphs.
+
+            ### Navigating levels
+            `set_coarse_level level=N`
+            - Level 0 = full detail, higher levels = coarser.
+            - Smooth animated transition between levels.
+            - Each level preserves community structure (colors stay meaningful).
+
+            ### Exploration strategy
+            1. **Start coarse**: Set a high level to see the overall community structure.
+               Fewer nodes means faster rendering and clearer big-picture patterns.
+            2. **Identify regions of interest**: Use color modes (community, pagerank) at the coarse level.
+            3. **Drill down**: Step down levels one at a time toward level 0.
+               Each step reveals finer structure within the communities.
+            4. **Use selection at fine level**: Once at level 0, use `select_top_nodes` to find
+               specific important nodes within the regions you identified.
+
+            ### Layout options
+            When loading with `load_graph_with_layout`:
+            - `iterations` — More iterations = better layout quality but slower. Default 300.
+            - `gravity` — Pull toward center. Higher = more compact. Default 0.05.
+            - `bounded` — Constrain layout to a bounding box (true/false).
+            - `aspect_ratio` — e.g., "16:9" for wide layouts, "1:1" for square.
+            - `layout` — "auto", "multilevel", or "flat" (no hierarchy).
+
+            ### Tips
+            - The levels panel in the UI shows all levels visually. Toggle with `set_render_option option=show_levels_panel`.
+            - Parent highlight shows which coarse node contains each fine node. Auto-disables above 2000 nodes.
+            - Re-run layout at any time with `rerun_layout` to improve node positioning.
+            """;
     }
 
     // -----------------------------------------------------------------------
@@ -483,6 +868,9 @@ public class McpServer
                 // ── Selection ──────────────────────────────────────────
                 "get_selection" => GetSelection(args),
                 "get_selection_summary" => GetSelectionSummary(),
+                "clear_selection" => ClearSelectionTool(args),
+                "set_selection" => SetSelectionTool(args),
+                "select_top_nodes" => SelectTopNodes(args),
 
                 // ── Coarsening levels ──────────────────────────────────
                 "get_coarse_levels" => GetCoarseLevels(args),
@@ -769,6 +1157,89 @@ public class McpServer
                 });
             }
             return new JsonObject { ["windows"] = list }.ToJsonString();
+        });
+    }
+
+    private string ClearSelectionTool(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        return InvokeOnUI(() =>
+        {
+            win.GraphView.ClearSelection();
+            win.SkiaView.ClearSelection();
+            return $"Selection cleared in {win.WindowId}";
+        });
+    }
+
+    private string SetSelectionTool(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        string indicesStr = Arg(args, "indices");
+        var indices = indicesStr.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(s => int.TryParse(s, out int v) ? v : -1)
+            .Where(v => v >= 0)
+            .ToArray();
+
+        return InvokeOnUI(() =>
+        {
+            win.GraphView.SetSelection(indices);
+            win.SkiaView.SetSelection(indices);
+            return $"Selected {win.GraphView.Selection.Count} nodes in {win.WindowId}";
+        });
+    }
+
+    private string SelectTopNodes(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        string metric = Arg(args, "metric");
+        int count = int.TryParse(OptArg(args, "count"), out int c) ? c : 20;
+        string order = OptArg(args, "order") ?? "desc";
+        int? community = int.TryParse(OptArg(args, "community"), out int comm) ? comm : null;
+
+        return InvokeOnUI(() =>
+        {
+            var graph = win.GraphView.GetGraph();
+            if (graph == null) return "No graph loaded";
+
+            var provider = new LumenGraph.NodeColorProvider();
+            provider.SetGraph(graph);
+            double[] values = provider.ComputeNodeMetric(metric);
+
+            // Build candidate list (optionally filtered by community)
+            var candidates = Enumerable.Range(0, graph.NodeCount);
+            if (community.HasValue)
+                candidates = candidates.Where(i => graph.Community[i] == community.Value);
+
+            // Sort and take top N
+            int[] sorted;
+            if (order == "asc")
+                sorted = candidates.OrderBy(i => values[i]).Take(count).ToArray();
+            else
+                sorted = candidates.OrderByDescending(i => values[i]).Take(count).ToArray();
+
+            win.GraphView.SetSelection(sorted);
+            win.SkiaView.SetSelection(sorted);
+
+            // Build response with node details
+            var nodes = new JsonArray();
+            foreach (int i in sorted)
+            {
+                nodes.Add(new JsonObject
+                {
+                    ["index"] = i,
+                    ["label"] = graph.Labels[i],
+                    ["community"] = graph.Community[i],
+                    [metric] = Math.Round(values[i], 6),
+                });
+            }
+            return new JsonObject
+            {
+                ["window"] = win.WindowId,
+                ["metric"] = metric,
+                ["order"] = order,
+                ["count"] = sorted.Length,
+                ["nodes"] = nodes,
+            }.ToJsonString();
         });
     }
 
