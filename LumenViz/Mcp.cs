@@ -311,6 +311,32 @@ public class McpServer
             ToolDef("list_data_files",
                 "List available .mtx data files in c:\\lumen-viz\\data.",
                 Props()),
+
+            // ── Window geometry ─────────────────────────────────────────
+            ToolDef("move_window",
+                "Move a window to a specific screen position (top-left corner).",
+                Props(
+                    ("window", "string", "Window ID", true),
+                    ("x", "string", "X position in pixels", true),
+                    ("y", "string", "Y position in pixels", true))),
+
+            ToolDef("resize_window",
+                "Resize a window's client area.",
+                Props(
+                    ("window", "string", "Window ID", true),
+                    ("width", "string", "Client width in pixels", true),
+                    ("height", "string", "Client height in pixels", true))),
+
+            ToolDef("arrange_windows",
+                "Tile all open windows in a grid on screen. " +
+                "Automatically calculates positions based on the number of windows.",
+                Props()),
+
+            // ── Process ────────────────────────────────────────────────
+            ToolDef("exit_process",
+                "Shut down the MCP server process. Use this to stop the server " +
+                "before rebuilding. The MCP client will need to restart it.",
+                Props()),
         };
     }
 
@@ -362,6 +388,14 @@ public class McpServer
 
                 // ── Data ───────────────────────────────────────────────
                 "list_data_files" => ListDataFiles(),
+
+                // ── Window geometry ─────────────────────────────────────
+                "move_window" => MoveWindow(args),
+                "resize_window" => ResizeWindow(args),
+                "arrange_windows" => ArrangeWindows(),
+
+                // ── Process ────────────────────────────────────────────
+                "exit_process" => ExitProcess(),
 
                 _ => throw new InvalidOperationException(
                     $"Unknown tool: {toolName}"),
@@ -501,6 +535,91 @@ public class McpServer
     {
         _windows.TryRemove(windowId, out _);
         Log($"    Window {windowId} closed by user");
+    }
+
+    // -----------------------------------------------------------------------
+    // Window geometry tools
+    // -----------------------------------------------------------------------
+
+    private string MoveWindow(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        int x = int.Parse(Arg(args, "x"));
+        int y = int.Parse(Arg(args, "y"));
+        InvokeOnUI(() =>
+        {
+            win.StartPosition = FormStartPosition.Manual;
+            win.Location = new Point(x, y);
+        });
+        return "OK";
+    }
+
+    private string ResizeWindow(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        int w = int.Parse(Arg(args, "width"));
+        int h = int.Parse(Arg(args, "height"));
+        InvokeOnUI(() =>
+        {
+            win.ClientSize = new Size(w, h);
+            win.GraphView.AutoFit();
+            win.GraphView.Invalidate();
+        });
+        return "OK";
+    }
+
+    private string ArrangeWindows()
+    {
+        var ids = _windows.Keys.ToList();
+        if (ids.Count == 0) return "No windows open";
+
+        return InvokeOnUI(() =>
+        {
+            // Get primary screen working area
+            var screen = Screen.PrimaryScreen?.WorkingArea
+                ?? new Rectangle(0, 0, 1920, 1080);
+
+            int count = ids.Count;
+            // Calculate grid dimensions
+            int cols = (int)Math.Ceiling(Math.Sqrt(count));
+            int rows = (int)Math.Ceiling((double)count / cols);
+
+            int cellW = screen.Width / cols;
+            int cellH = screen.Height / rows;
+
+            for (int i = 0; i < count; i++)
+            {
+                if (!_windows.TryGetValue(ids[i], out var win)) continue;
+                int col = i % cols;
+                int row = i / cols;
+
+                win.StartPosition = FormStartPosition.Manual;
+                win.Location = new Point(
+                    screen.Left + col * cellW,
+                    screen.Top + row * cellH);
+                win.ClientSize = new Size(cellW, cellH);
+                win.GraphView.AutoFit();
+                win.GraphView.Invalidate();
+            }
+
+            return $"Arranged {count} windows in {cols}x{rows} grid";
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Process control
+    // -----------------------------------------------------------------------
+
+    private string ExitProcess()
+    {
+        Log("  exit_process requested — shutting down");
+        // Send the result before exiting
+        Task.Run(async () =>
+        {
+            await Task.Delay(100); // let the response flush
+            Environment.Exit(0);
+        });
+        return "Shutting down";
     }
 
     // -----------------------------------------------------------------------
