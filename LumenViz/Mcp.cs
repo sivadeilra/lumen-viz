@@ -1,29 +1,44 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace LumenViz;
 
 /// <summary>
-/// Minimal MCP (Model Context Protocol) server.
-/// Reads JSON-RPC 2.0 from stdin, dispatches tool calls to the WinForms
-/// UI thread via Control.Invoke(), and writes responses to stdout.
+/// Windowless MCP (Model Context Protocol) server.
+///
+/// Runs as a headless process — no windows on startup. MCP tools create,
+/// command, and query windows. User interactions are queued and polled.
+///
+/// JSON-RPC 2.0 over stdin/stdout.
 /// </summary>
 public class McpServer
 {
-    private readonly MainForm _form;
+    private readonly ApplicationContext _appContext;
     private readonly TextReader _input;
     private readonly TextWriter _output;
     private readonly object _writeLock = new();
 
-    public McpServer(MainForm form, TextReader input, TextWriter output)
+    /// <summary>Windows managed by this server, keyed by ID.</summary>
+    private readonly ConcurrentDictionary<string, VizWindow> _windows = new();
+    private int _windowCounter;
+
+    /// <summary>
+    /// Hidden form used to marshal calls to the UI thread when no
+    /// visible windows exist yet.
+    /// </summary>
+    private Form? _invokeHelper;
+
+    public McpServer(ApplicationContext appContext, TextReader input, TextWriter output)
     {
-        _form = form;
+        _appContext = appContext;
         _input = input;
         _output = output;
     }
 
     /// <summary>
     /// Start the MCP read loop on a background thread.
+    /// Call this after Application.Run() has started the message pump.
     /// </summary>
     public void Start()
     {
@@ -35,19 +50,38 @@ public class McpServer
         thread.Start();
     }
 
+    /// <summary>
+    /// Create the hidden invoke-helper form on the UI thread.
+    /// Must be called from the UI thread (e.g. before Application.Run
+    /// or via form.Load).
+    /// </summary>
+    public void CreateInvokeHelper()
+    {
+        _invokeHelper = new Form
+        {
+            ShowInTaskbar = false,
+            FormBorderStyle = FormBorderStyle.None,
+            WindowState = FormWindowState.Minimized,
+            Opacity = 0,
+            Size = new Size(1, 1),
+        };
+        _invokeHelper.Show();
+        _invokeHelper.Hide();
+    }
+
     // -----------------------------------------------------------------------
     // Read loop
     // -----------------------------------------------------------------------
 
     private void ReadLoop()
     {
-        Log("MCP server started, reading stdin...");
+        Log("MCP server started (windowless), reading stdin...");
         try
         {
             while (true)
             {
                 var line = _input.ReadLine();
-                if (line == null) break; // stdin closed
+                if (line == null) break;
                 if (string.IsNullOrWhiteSpace(line)) continue;
 
                 try
@@ -68,7 +102,12 @@ public class McpServer
         }
 
         Log("Stdin closed, shutting down.");
-        _form.Invoke(() => _form.Close());
+        InvokeOnUI(() =>
+        {
+            foreach (var w in _windows.Values)
+                w.Close();
+            _appContext.ExitThread();
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -95,13 +134,12 @@ public class McpServer
                     ["serverInfo"] = new JsonObject
                     {
                         ["name"] = "lumen-viz",
-                        ["version"] = "0.1.0",
+                        ["version"] = "0.2.0",
                     },
                 });
                 break;
 
             case "notifications/initialized":
-                // Notification — no response.
                 break;
 
             case "tools/list":
@@ -123,7 +161,7 @@ public class McpServer
     }
 
     // -----------------------------------------------------------------------
-    // Tool registry
+    // Tool schema helpers
     // -----------------------------------------------------------------------
 
     private static JsonObject ToolDef(
@@ -138,18 +176,18 @@ public class McpServer
     }
 
     private static JsonObject Props(
-        params (string name, string type, string description)[] properties)
+        params (string name, string type, string description, bool required)[] properties)
     {
         var props = new JsonObject();
         var required = new JsonArray();
-        foreach (var (name, type, desc) in properties)
+        foreach (var (name, type, desc, req) in properties)
         {
             props[name] = new JsonObject
             {
                 ["type"] = type,
                 ["description"] = desc,
             };
-            required.Add(name);
+            if (req) required.Add(name);
         }
         var schema = new JsonObject
         {
@@ -161,79 +199,115 @@ public class McpServer
         return schema;
     }
 
+    /// <summary>Shorthand: all properties required.</summary>
+    private static JsonObject PropsReq(
+        params (string name, string type, string description)[] properties)
+    {
+        var tuples = properties.Select(p => (p.name, p.type, p.description, true)).ToArray();
+        return Props(tuples);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tool registry
+    // -----------------------------------------------------------------------
+
     private static JsonArray BuildToolList()
     {
         return new JsonArray
         {
-            ToolDef("set_label_text",
-                "Set the text of the hello-world label.",
-                Props(("text", "string", "The text to display"))),
+            // ── Window management ──────────────────────────────────────
+            ToolDef("create_window",
+                "Create a new visualization window. Returns its window ID.",
+                Props(
+                    ("title", "string", "Window title", false),
+                    ("width", "string", "Client width in pixels (default 1280)", false),
+                    ("height", "string", "Client height in pixels (default 800)", false))),
 
-            ToolDef("get_label_text",
-                "Get the current text of the hello-world label.",
+            ToolDef("close_window",
+                "Close a window by ID.",
+                PropsReq(("window", "string", "Window ID"))),
+
+            ToolDef("list_windows",
+                "List all open windows with their IDs and titles.",
                 Props()),
-
-            ToolDef("set_label_color",
-                "Set the foreground color of the hello-world label.",
-                Props(("color", "string",
-                    "A named color (Red, Blue, ...) or hex (#RRGGBB)"))),
-
-            ToolDef("set_textbox_text",
-                "Set the text of the text box.",
-                Props(("text", "string", "The text to set"))),
-
-            ToolDef("get_textbox_text",
-                "Get the current text of the text box.",
-                Props()),
-
-            ToolDef("set_window_title",
-                "Set the window title bar text.",
-                Props(("title", "string", "The new window title"))),
 
             ToolDef("get_window_info",
-                "Get information about the window (title, size, etc.).",
-                Props()),
+                "Get info about a window (title, size, state, graph info).",
+                PropsReq(("window", "string", "Window ID"))),
+
+            ToolDef("set_window_title",
+                "Set the title of a window.",
+                PropsReq(("window", "string", "Window ID"),
+                      ("title", "string", "New title"))),
+
+            ToolDef("get_interactions",
+                "Drain all pending user interaction events from a window (clicks, keys, resize). " +
+                "Returns an array of event objects. Each event has a type, timestamp, and " +
+                "event-specific fields (e.g. node_index for node clicks).",
+                PropsReq(("window", "string", "Window ID"))),
 
             ToolDef("show_message",
-                "Show a message box to the user.",
-                Props(("text", "string", "Message body"),
-                      ("caption", "string", "Dialog title"))),
+                "Show a modal message box on a window.",
+                Props(("window", "string", "Window ID", true),
+                      ("text", "string", "Message body", true),
+                      ("caption", "string", "Dialog title", false))),
 
-            // ── Graph visualization tools ──────────────────────────
+            // ── Graph visualization ────────────────────────────────────
             ToolDef("load_graph",
-                "Load a graph from a Matrix Market (.mtx) file and display it with force-directed layout.",
-                Props(("path", "string", "Absolute path to a .mtx file"))),
+                "Load a graph from a Matrix Market (.mtx) file into a window. " +
+                "Runs community detection and force-directed layout automatically.",
+                PropsReq(("window", "string", "Window ID"),
+                      ("path", "string", "Absolute path to a .mtx file"))),
 
             ToolDef("load_graph_with_layout",
-                "Load a graph from a .mtx file and run layout with custom parameters.",
-                Props(("path", "string", "Absolute path to a .mtx file"),
-                      ("iterations", "string", "Number of layout iterations (default 300)"),
-                      ("gravity", "string", "Gravity constant (default 0.05)"))),
+                "Load a graph with custom layout parameters.",
+                Props(
+                    ("window", "string", "Window ID", true),
+                    ("path", "string", "Absolute path to a .mtx file", true),
+                    ("iterations", "string", "Layout iterations (default 300)", false),
+                    ("gravity", "string", "Gravity constant (default 0.05)", false))),
 
             ToolDef("get_graph_info",
-                "Get info about the currently loaded graph (nodes, edges, communities).",
-                Props()),
-
-            ToolDef("set_show_labels",
-                "Toggle node label display.",
-                Props(("show", "string", "true or false"))),
-
-            ToolDef("set_node_radius",
-                "Set the base node radius in pixels.",
-                Props(("radius", "string", "Radius (e.g. 4, 6, 10)"))),
-
-            ToolDef("set_edge_alpha",
-                "Set edge transparency (0.0 = invisible, 1.0 = opaque).",
-                Props(("alpha", "string", "Alpha value 0.0-1.0"))),
-
-            ToolDef("auto_fit",
-                "Re-center and zoom to fit the graph in the view.",
-                Props()),
+                "Get info about the graph loaded in a window.",
+                PropsReq(("window", "string", "Window ID"))),
 
             ToolDef("rerun_layout",
-                "Re-run force-directed layout on the current graph.",
-                Props(("iterations", "string", "Number of iterations (default 300)"))),
+                "Re-run force-directed layout with fresh random positions.",
+                Props(
+                    ("window", "string", "Window ID", true),
+                    ("iterations", "string", "Number of iterations (default 300)", false))),
 
+            ToolDef("auto_fit",
+                "Re-center and zoom to fit the graph in a window.",
+                PropsReq(("window", "string", "Window ID"))),
+
+            // ── Visual settings ────────────────────────────────────────
+            ToolDef("set_show_labels",
+                "Toggle node label display in a window.",
+                PropsReq(("window", "string", "Window ID"),
+                      ("show", "string", "true or false"))),
+
+            ToolDef("set_node_radius",
+                "Set the base node radius (pixels).",
+                PropsReq(("window", "string", "Window ID"),
+                      ("radius", "string", "Radius (e.g. 4, 6, 10)"))),
+
+            ToolDef("set_edge_alpha",
+                "Set edge transparency (0.0 invisible \u2013 1.0 opaque).",
+                PropsReq(("window", "string", "Window ID"),
+                      ("alpha", "string", "Alpha value 0.0\u20131.0"))),
+
+            ToolDef("set_label_text",
+                "Set the status bar text in a window.",
+                PropsReq(("window", "string", "Window ID"),
+                      ("text", "string", "The text to display"))),
+
+            ToolDef("set_label_color",
+                "Set the status bar text color.",
+                PropsReq(("window", "string", "Window ID"),
+                      ("color", "string", "Named color or hex (#RRGGBB)"))),
+
+            // ── Data ───────────────────────────────────────────────────
             ToolDef("list_data_files",
                 "List available .mtx data files in c:\\lumen-viz\\data.",
                 Props()),
@@ -261,124 +335,32 @@ public class McpServer
         {
             string result = toolName switch
             {
-                "set_label_text" => InvokeOnUI(() =>
-                {
-                    _form.HelloLabel.Text = Arg(args, "text");
-                    return "OK";
-                }),
+                // ── Window management ──────────────────────────────────
+                "create_window" => CreateWindow(args),
+                "close_window" => CloseWindow(args),
+                "list_windows" => ListWindows(),
+                "get_window_info" => GetWindowInfo(args),
+                "set_window_title" => SetWindowTitle(args),
+                "get_interactions" => GetInteractions(args),
+                "show_message" => ShowMessage(args),
 
-                "get_label_text" => InvokeOnUI(() =>
-                    _form.HelloLabel.Text ?? ""),
-
-                "set_label_color" => InvokeOnUI(() =>
-                {
-                    var colorStr = Arg(args, "color");
-                    var color = ParseColor(colorStr);
-                    _form.HelloLabel.ForeColor = color;
-                    return $"Color set to {color.Name}";
-                }),
-
-                "set_textbox_text" => InvokeOnUI(() =>
-                {
-                    _form.InputTextBox.Text = Arg(args, "text");
-                    return "OK";
-                }),
-
-                "get_textbox_text" => InvokeOnUI(() =>
-                    _form.InputTextBox.Text ?? ""),
-
-                "set_window_title" => InvokeOnUI(() =>
-                {
-                    _form.Text = Arg(args, "title");
-                    return "OK";
-                }),
-
-                "get_window_info" => InvokeOnUI(() =>
-                {
-                    var info = new JsonObject
-                    {
-                        ["title"] = _form.Text,
-                        ["width"] = _form.ClientSize.Width,
-                        ["height"] = _form.ClientSize.Height,
-                        ["windowState"] = _form.WindowState.ToString(),
-                    };
-                    return info.ToJsonString();
-                }),
-
-                "show_message" => InvokeOnUI(() =>
-                {
-                    var text = Arg(args, "text");
-                    var caption = ArgOr(args, "caption", "Lumen Viz");
-                    MessageBox.Show(_form, text, caption,
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return "OK";
-                }),
-
-                // ── Graph visualization tools ──────────────────────────
-
-                "load_graph" => LoadGraph(args, iterations: 300, gravity: 0.05),
-
+                // ── Graph visualization ────────────────────────────────
+                "load_graph" => LoadGraph(args, 300, 0.05),
                 "load_graph_with_layout" => LoadGraph(args,
-                    int.TryParse(ArgOr(args, "iterations", "300"), out var it) ? it : 300,
-                    double.TryParse(ArgOr(args, "gravity", "0.05"),
-                        System.Globalization.CultureInfo.InvariantCulture,
-                        out var gv) ? gv : 0.05),
+                    IntArg(args, "iterations", 300),
+                    DoubleArg(args, "gravity", 0.05)),
+                "get_graph_info" => GetGraphInfo(args),
+                "rerun_layout" => RerunLayout(args, IntArg(args, "iterations", 300)),
+                "auto_fit" => AutoFitWindow(args),
 
-                "get_graph_info" => InvokeOnUI(() =>
-                {
-                    var graph = _form.GraphView.GetGraph();
-                    if (graph == null) return "No graph loaded";
-                    var communities = graph.Nodes.Select(n => n.Community).Distinct().Count();
-                    var info = new JsonObject
-                    {
-                        ["title"] = graph.Title,
-                        ["nodes"] = graph.Nodes.Count,
-                        ["edges"] = graph.Edges.Count,
-                        ["communities"] = communities,
-                    };
-                    return info.ToJsonString();
-                }),
+                // ── Visual settings ────────────────────────────────────
+                "set_show_labels" => SetShowLabels(args),
+                "set_node_radius" => SetNodeRadius(args),
+                "set_edge_alpha" => SetEdgeAlpha(args),
+                "set_label_text" => SetLabelText(args),
+                "set_label_color" => SetLabelColor(args),
 
-                "set_show_labels" => InvokeOnUI(() =>
-                {
-                    _form.GraphView.ShowLabels = Arg(args, "show")
-                        .Equals("true", StringComparison.OrdinalIgnoreCase);
-                    _form.GraphView.Invalidate();
-                    return "OK";
-                }),
-
-                "set_node_radius" => InvokeOnUI(() =>
-                {
-                    if (float.TryParse(Arg(args, "radius"),
-                        System.Globalization.CultureInfo.InvariantCulture, out float r))
-                    {
-                        _form.GraphView.NodeRadius = r;
-                        _form.GraphView.Invalidate();
-                    }
-                    return "OK";
-                }),
-
-                "set_edge_alpha" => InvokeOnUI(() =>
-                {
-                    if (float.TryParse(Arg(args, "alpha"),
-                        System.Globalization.CultureInfo.InvariantCulture, out float a))
-                    {
-                        _form.GraphView.EdgeAlpha = a;
-                        _form.GraphView.Invalidate();
-                    }
-                    return "OK";
-                }),
-
-                "auto_fit" => InvokeOnUI(() =>
-                {
-                    _form.GraphView.AutoFit();
-                    _form.GraphView.Invalidate();
-                    return "OK";
-                }),
-
-                "rerun_layout" => RerunLayout(
-                    int.TryParse(ArgOr(args, "iterations", "300"), out var ri) ? ri : 300),
-
+                // ── Data ───────────────────────────────────────────────
                 "list_data_files" => ListDataFiles(),
 
                 _ => throw new InvalidOperationException(
@@ -394,11 +376,141 @@ public class McpServer
     }
 
     // -----------------------------------------------------------------------
-    // Graph tool helpers
+    // Window management tools
+    // -----------------------------------------------------------------------
+
+    private string CreateWindow(JsonNode? args)
+    {
+        string title = ArgOr(args, "title", "Lumen Viz  ◇");
+        int width = IntArg(args, "width", 1280);
+        int height = IntArg(args, "height", 800);
+        int num = Interlocked.Increment(ref _windowCounter);
+        string winId = $"win{num}";
+
+        InvokeOnUI(() =>
+        {
+            var window = new VizWindow(winId, title, width, height);
+            window.WindowClosed += OnWindowClosed;
+            _windows[winId] = window;
+            window.Show();
+        });
+
+        Log($"    Created window {winId} ({width}x{height})");
+        return new JsonObject
+        {
+            ["window"] = winId,
+            ["title"] = title,
+            ["width"] = width,
+            ["height"] = height,
+        }.ToJsonString();
+    }
+
+    private string CloseWindow(JsonNode? args)
+    {
+        var winId = Arg(args, "window");
+        return InvokeOnUI(() =>
+        {
+            if (_windows.TryGetValue(winId, out var win))
+            {
+                win.Close();
+                return "OK";
+            }
+            return $"Window not found: {winId}";
+        });
+    }
+
+    private string ListWindows()
+    {
+        return InvokeOnUI(() =>
+        {
+            var list = new JsonArray();
+            foreach (var (id, win) in _windows)
+            {
+                list.Add(new JsonObject
+                {
+                    ["id"] = id,
+                    ["title"] = win.Text,
+                    ["width"] = win.ClientSize.Width,
+                    ["height"] = win.ClientSize.Height,
+                    ["has_graph"] = win.GraphView.GetGraph() != null,
+                });
+            }
+            return new JsonObject { ["windows"] = list }.ToJsonString();
+        });
+    }
+
+    private string GetWindowInfo(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        return InvokeOnUI(() =>
+        {
+            var graph = win.GraphView.GetGraph();
+            var info = new JsonObject
+            {
+                ["id"] = win.WindowId,
+                ["title"] = win.Text,
+                ["width"] = win.ClientSize.Width,
+                ["height"] = win.ClientSize.Height,
+                ["windowState"] = win.WindowState.ToString(),
+            };
+            if (graph != null)
+            {
+                info["graph_title"] = graph.Title;
+                info["graph_nodes"] = graph.Nodes.Count;
+                info["graph_edges"] = graph.Edges.Count;
+                info["graph_communities"] =
+                    graph.Nodes.Select(n => n.Community).Distinct().Count();
+            }
+            return info.ToJsonString();
+        });
+    }
+
+    private string SetWindowTitle(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        var title = Arg(args, "title");
+        InvokeOnUI(() => { win.Text = title; });
+        return "OK";
+    }
+
+    private string GetInteractions(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        var events = win.DrainInteractions();
+        return new JsonObject
+        {
+            ["window"] = win.WindowId,
+            ["count"] = events.Count,
+            ["events"] = events,
+        }.ToJsonString();
+    }
+
+    private string ShowMessage(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        var text = Arg(args, "text");
+        var caption = ArgOr(args, "caption", "Lumen Viz");
+        return InvokeOnUI(() =>
+        {
+            MessageBox.Show(win, text, caption,
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return "OK";
+        });
+    }
+
+    private void OnWindowClosed(string windowId)
+    {
+        _windows.TryRemove(windowId, out _);
+        Log($"    Window {windowId} closed by user");
+    }
+
+    // -----------------------------------------------------------------------
+    // Graph tools
     // -----------------------------------------------------------------------
 
     private string LoadGraph(JsonNode? args, int iterations, double gravity)
     {
+        var win = GetWindow(args);
         var path = Arg(args, "path");
         Log($"    Loading graph from {path}");
 
@@ -416,31 +528,49 @@ public class McpServer
 
         InvokeOnUI(() =>
         {
-            _form.GraphView.SetGraph(graph);
-            var communities = graph.Nodes.Select(n => n.Community).Distinct().Count();
-            _form.SetStatus(
+            win.GraphView.SetGraph(graph);
+            var c = graph.Nodes.Select(n => n.Community).Distinct().Count();
+            win.SetStatus(
                 $"◇  {graph.Title}  —  {graph.Nodes.Count} nodes, " +
-                $"{graph.Edges.Count} edges, {communities} communities");
-            return 0;
+                $"{graph.Edges.Count} edges, {c} communities");
         });
 
-        var communities2 = graph.Nodes.Select(n => n.Community).Distinct().Count();
-        var info = new JsonObject
+        var communities = graph.Nodes.Select(n => n.Community).Distinct().Count();
+        return new JsonObject
         {
+            ["window"] = win.WindowId,
             ["title"] = graph.Title,
             ["nodes"] = graph.Nodes.Count,
             ["edges"] = graph.Edges.Count,
-            ["communities"] = communities2,
+            ["communities"] = communities,
             ["status"] = "loaded and displayed",
-        };
-        return info.ToJsonString();
+        }.ToJsonString();
     }
 
-    private string RerunLayout(int iterations)
+    private string GetGraphInfo(JsonNode? args)
     {
+        var win = GetWindow(args);
         return InvokeOnUI(() =>
         {
-            var graph = _form.GraphView.GetGraph();
+            var graph = win.GraphView.GetGraph();
+            if (graph == null) return "No graph loaded";
+            return new JsonObject
+            {
+                ["title"] = graph.Title,
+                ["nodes"] = graph.Nodes.Count,
+                ["edges"] = graph.Edges.Count,
+                ["communities"] =
+                    graph.Nodes.Select(n => n.Community).Distinct().Count(),
+            }.ToJsonString();
+        });
+    }
+
+    private string RerunLayout(JsonNode? args, int iterations)
+    {
+        var win = GetWindow(args);
+        return InvokeOnUI(() =>
+        {
+            var graph = win.GraphView.GetGraph();
             if (graph == null) return "No graph loaded";
 
             var layout = new ForceLayout(graph)
@@ -451,11 +581,89 @@ public class McpServer
             };
             layout.Randomize();
             layout.Run();
-            _form.GraphView.AutoFit();
-            _form.GraphView.Invalidate();
+            win.GraphView.AutoFit();
+            win.GraphView.Invalidate();
             return "Layout recomputed";
         });
     }
+
+    private string AutoFitWindow(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        InvokeOnUI(() =>
+        {
+            win.GraphView.AutoFit();
+            win.GraphView.Invalidate();
+        });
+        return "OK";
+    }
+
+    // -----------------------------------------------------------------------
+    // Visual settings tools
+    // -----------------------------------------------------------------------
+
+    private string SetShowLabels(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        bool show = Arg(args, "show")
+            .Equals("true", StringComparison.OrdinalIgnoreCase);
+        InvokeOnUI(() =>
+        {
+            win.GraphView.ShowLabels = show;
+            win.GraphView.Invalidate();
+        });
+        return "OK";
+    }
+
+    private string SetNodeRadius(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        if (float.TryParse(Arg(args, "radius"),
+            System.Globalization.CultureInfo.InvariantCulture, out float r))
+        {
+            InvokeOnUI(() =>
+            {
+                win.GraphView.NodeRadius = r;
+                win.GraphView.Invalidate();
+            });
+        }
+        return "OK";
+    }
+
+    private string SetEdgeAlpha(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        if (float.TryParse(Arg(args, "alpha"),
+            System.Globalization.CultureInfo.InvariantCulture, out float a))
+        {
+            InvokeOnUI(() =>
+            {
+                win.GraphView.EdgeAlpha = a;
+                win.GraphView.Invalidate();
+            });
+        }
+        return "OK";
+    }
+
+    private string SetLabelText(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        var text = Arg(args, "text");
+        InvokeOnUI(() => win.SetStatus(text));
+        return "OK";
+    }
+
+    private string SetLabelColor(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        var color = ParseColor(Arg(args, "color"));
+        InvokeOnUI(() => win.ForeColor = color);
+        return "OK";
+    }
+
+    // -----------------------------------------------------------------------
+    // Data tools
+    // -----------------------------------------------------------------------
 
     private static string ListDataFiles()
     {
@@ -466,21 +674,46 @@ public class McpServer
         var files = Directory.GetFiles(dataDir, "*.mtx", SearchOption.AllDirectories);
         var list = new JsonArray();
         foreach (var f in files)
-        {
             list.Add(f);
-        }
-        var result = new JsonObject { ["files"] = list };
-        return result.ToJsonString();
+        return new JsonObject { ["files"] = list }.ToJsonString();
+    }
+
+    // -----------------------------------------------------------------------
+    // Window lookup
+    // -----------------------------------------------------------------------
+
+    private VizWindow GetWindow(JsonNode? args)
+    {
+        var winId = Arg(args, "window");
+        if (_windows.TryGetValue(winId, out var win))
+            return win;
+        throw new ArgumentException($"Window not found: {winId}");
     }
 
     // -----------------------------------------------------------------------
     // UI thread bridge
     // -----------------------------------------------------------------------
 
+    private void InvokeOnUI(Action action)
+    {
+        if (_invokeHelper != null && !_invokeHelper.IsDisposed
+            && _invokeHelper.InvokeRequired)
+        {
+            _invokeHelper.Invoke(action);
+        }
+        else
+        {
+            action();
+        }
+    }
+
     private T InvokeOnUI<T>(Func<T> func)
     {
-        if (_form.InvokeRequired)
-            return (T)_form.Invoke(func);
+        if (_invokeHelper != null && !_invokeHelper.IsDisposed
+            && _invokeHelper.InvokeRequired)
+        {
+            return (T)_invokeHelper.Invoke(func);
+        }
         return func();
     }
 
@@ -572,6 +805,20 @@ public class McpServer
         return args?[name]?.GetValue<string>() ?? fallback;
     }
 
+    private static int IntArg(JsonNode? args, string name, int fallback)
+    {
+        var s = args?[name]?.GetValue<string>();
+        return s != null && int.TryParse(s, out var v) ? v : fallback;
+    }
+
+    private static double DoubleArg(JsonNode? args, string name, double fallback)
+    {
+        var s = args?[name]?.GetValue<string>();
+        return s != null && double.TryParse(s,
+            System.Globalization.CultureInfo.InvariantCulture, out var v)
+            ? v : fallback;
+    }
+
     private static Color ParseColor(string s)
     {
         if (s.StartsWith('#') && (s.Length == 7 || s.Length == 9))
@@ -583,7 +830,7 @@ public class McpServer
     }
 
     // -----------------------------------------------------------------------
-    // Logging (stderr — per MCP convention)
+    // Logging (stderr)
     // -----------------------------------------------------------------------
 
     private static void Log(string message)

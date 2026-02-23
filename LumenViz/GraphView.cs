@@ -197,7 +197,7 @@ public class GraphView : Control
 
     // ── Coordinate transforms ───────────────────────────────────────────
 
-    private PointF WorldToScreen(GraphNode node)
+    public PointF WorldToScreen(GraphNode node)
     {
         return new PointF(
             (float)(node.X * _zoom + _pan.X),

@@ -10,23 +10,32 @@ static class Program
     {
         ApplicationConfiguration.Initialize();
 
-        var form = new MainForm();
         bool mcpMode = args.Contains("--mcp", StringComparer.OrdinalIgnoreCase);
 
         if (mcpMode)
         {
-            // MCP mode: read JSON-RPC from stdin, write to stdout.
-            // Detach Console.Out so nothing else accidentally writes to it.
+            // Windowless MCP mode: no form on startup.
+            // MCP tools create/manage windows on demand.
             var stdoutWriter = new StreamWriter(Console.OpenStandardOutput())
             {
                 AutoFlush = true,
             };
             var stdinReader = new StreamReader(Console.OpenStandardInput());
 
-            var server = new McpServer(form, stdinReader, stdoutWriter);
-            server.Start();
-        }
+            var appContext = new ApplicationContext();
+            var server = new McpServer(appContext, stdinReader, stdoutWriter);
 
-        Application.Run(form);
+            // Create the invoke helper on the UI thread, then start MCP.
+            server.CreateInvokeHelper();
+            server.Start();
+
+            Application.Run(appContext);
+        }
+        else
+        {
+            // Interactive mode: show a default window.
+            var form = new MainForm();
+            Application.Run(form);
+        }
     }
 }
