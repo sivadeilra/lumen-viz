@@ -15,6 +15,7 @@ public class ForceLayout
 {
     private readonly GraphModel _graph;
     private readonly Random _rng = new(42);
+    private QuadTree? _quadTree;
 
     // Layout parameters
     public double Width { get; set; } = 1000;
@@ -102,7 +103,10 @@ public class ForceLayout
             }
             else
             {
-                RepulsiveApprox(k2, dx, dy);
+                // Barnes-Hut quadtree: O(n log n) repulsive approximation
+                _quadTree ??= new QuadTree();
+                _quadTree.Build(px, py, n);
+                _quadTree.ComputeRepulsion(px, py, n, k2, dx, dy);
             }
 
             // ── Attractive forces (edges) ──────────────────────────────
@@ -160,111 +164,4 @@ public class ForceLayout
         }
     }
 
-    /// <summary>
-    /// Grid-based repulsive force approximation for large graphs.
-    /// Reuses a single flat array for grid cells instead of
-    /// Dictionary{(int,int), List{int}} — eliminates ~N*iter allocations.
-    /// </summary>
-    private void RepulsiveApprox(double k2, double[] dx, double[] dy)
-    {
-        int n = _graph.NodeCount;
-        double k = Math.Sqrt(k2);
-        double cutoff = k * 3;
-        double cellSize = cutoff;
-
-        var px = _graph.NodeX;
-        var py = _graph.NodeY;
-
-        // Compute grid bounds
-        double minX = double.MaxValue, minY = double.MaxValue;
-        double maxX = double.MinValue, maxY = double.MinValue;
-        for (int i = 0; i < n; i++)
-        {
-            if (px[i] < minX) minX = px[i];
-            if (py[i] < minY) minY = py[i];
-            if (px[i] > maxX) maxX = px[i];
-            if (py[i] > maxY) maxY = py[i];
-        }
-
-        int gridW = Math.Max(1, (int)((maxX - minX) / cellSize) + 2);
-        int gridH = Math.Max(1, (int)((maxY - minY) / cellSize) + 2);
-        int totalCells = gridW * gridH;
-
-        // Count nodes per cell
-        var cellCount = new int[totalCells];
-        var nodeCell = new int[n]; // which cell each node belongs to
-
-        for (int i = 0; i < n; i++)
-        {
-            int gx = Math.Clamp((int)((px[i] - minX) / cellSize), 0, gridW - 1);
-            int gy = Math.Clamp((int)((py[i] - minY) / cellSize), 0, gridH - 1);
-            int cell = gy * gridW + gx;
-            nodeCell[i] = cell;
-            cellCount[cell]++;
-        }
-
-        // Build cell offsets (prefix sum) and cell member list
-        var cellOffset = new int[totalCells + 1];
-        for (int c = 0; c < totalCells; c++)
-            cellOffset[c + 1] = cellOffset[c] + cellCount[c];
-
-        var cellMembers = new int[n];
-        var cursor = new int[totalCells];
-        Array.Copy(cellOffset, cursor, totalCells);
-        for (int i = 0; i < n; i++)
-            cellMembers[cursor[nodeCell[i]]++] = i;
-
-        // For each cell, check neighboring cells
-        for (int cy2 = 0; cy2 < gridH; cy2++)
-        {
-            for (int cx2 = 0; cx2 < gridW; cx2++)
-            {
-                int cellA = cy2 * gridW + cx2;
-                int startA = cellOffset[cellA];
-                int endA = cellOffset[cellA + 1];
-                if (startA == endA) continue;
-
-                for (int ny = cy2 - 1; ny <= cy2 + 1; ny++)
-                {
-                    if (ny < 0 || ny >= gridH) continue;
-                    for (int nx = cx2 - 1; nx <= cx2 + 1; nx++)
-                    {
-                        if (nx < 0 || nx >= gridW) continue;
-                        int cellB = ny * gridW + nx;
-                        int startB = cellOffset[cellB];
-                        int endB = cellOffset[cellB + 1];
-                        if (startB == endB) continue;
-
-                        // Same cell: only do i < j pairs
-                        bool sameCell = (cellA == cellB);
-
-                        for (int ai = startA; ai < endA; ai++)
-                        {
-                            int i = cellMembers[ai];
-                            int jStart = sameCell ? ai + 1 : startB;
-                            for (int bi = jStart; bi < endB; bi++)
-                            {
-                                int j = cellMembers[bi];
-
-                                double deltaX = px[i] - px[j];
-                                double deltaY = py[i] - py[j];
-                                double dist2 = deltaX * deltaX + deltaY * deltaY;
-                                if (dist2 < 0.01) dist2 = 0.01;
-                                double dist = Math.Sqrt(dist2);
-
-                                if (dist > cutoff) continue;
-
-                                double force = k2 / dist;
-                                double fx = (deltaX / dist) * force;
-                                double fy = (deltaY / dist) * force;
-
-                                dx[i] += fx; dy[i] += fy;
-                                dx[j] -= fx; dy[j] -= fy;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 }

@@ -265,7 +265,8 @@ public class McpServer
                     ("window", "string", "Window ID", true),
                     ("path", "string", "Absolute path to a .mtx file", true),
                     ("iterations", "string", "Layout iterations (default 300)", false),
-                    ("gravity", "string", "Gravity constant (default 0.05)", false))),
+                    ("gravity", "string", "Gravity constant (default 0.05)", false),
+                    ("layout", "string", "Layout mode: 'auto' (default), 'flat', or 'multilevel'", false))),
 
             ToolDef("get_graph_info",
                 "Get info about the graph loaded in a window.",
@@ -275,7 +276,8 @@ public class McpServer
                 "Re-run force-directed layout with fresh random positions.",
                 Props(
                     ("window", "string", "Window ID", true),
-                    ("iterations", "string", "Number of iterations (default 300)", false))),
+                    ("iterations", "string", "Number of iterations (default 300)", false),
+                    ("layout", "string", "Layout mode: 'auto' (default), 'flat', or 'multilevel'", false))),
 
             ToolDef("auto_fit",
                 "Re-center and zoom to fit the graph in a window.",
@@ -371,12 +373,14 @@ public class McpServer
                 "show_message" => ShowMessage(args),
 
                 // ── Graph visualization ────────────────────────────────
-                "load_graph" => LoadGraph(args, 300, 0.05),
+                "load_graph" => LoadGraph(args, 300, 0.05, "auto"),
                 "load_graph_with_layout" => LoadGraph(args,
                     IntArg(args, "iterations", 300),
-                    DoubleArg(args, "gravity", 0.05)),
+                    DoubleArg(args, "gravity", 0.05),
+                    ArgOr(args, "layout", "auto")),
                 "get_graph_info" => GetGraphInfo(args),
-                "rerun_layout" => RerunLayout(args, IntArg(args, "iterations", 300)),
+                "rerun_layout" => RerunLayout(args, IntArg(args, "iterations", 300),
+                    ArgOr(args, "layout", "auto")),
                 "auto_fit" => AutoFitWindow(args),
 
                 // ── Visual settings ────────────────────────────────────
@@ -626,7 +630,7 @@ public class McpServer
     // Graph tools
     // -----------------------------------------------------------------------
 
-    private string LoadGraph(JsonNode? args, int iterations, double gravity)
+    private string LoadGraph(JsonNode? args, int iterations, double gravity, string layoutMode)
     {
         var win = GetWindow(args);
         var path = Arg(args, "path");
@@ -635,14 +639,7 @@ public class McpServer
         var graph = MatrixMarketReader.ReadFile(path);
         graph.DetectCommunities();
 
-        var layout = new ForceLayout(graph)
-        {
-            Width = 1000,
-            Height = 1000,
-            Iterations = iterations,
-            Gravity = gravity,
-        };
-        layout.Run();
+        RunLayout(graph, iterations, gravity, layoutMode);
 
         InvokeOnUI(() =>
         {
@@ -682,7 +679,7 @@ public class McpServer
         });
     }
 
-    private string RerunLayout(JsonNode? args, int iterations)
+    private string RerunLayout(JsonNode? args, int iterations, string layoutMode)
     {
         var win = GetWindow(args);
         return InvokeOnUI(() =>
@@ -690,18 +687,51 @@ public class McpServer
             var graph = win.GraphView.GetGraph();
             if (graph == null) return "No graph loaded";
 
+            RunLayout(graph, iterations, 0.05, layoutMode);
+            win.GraphView.AutoFit();
+            win.GraphView.Invalidate();
+            return "Layout recomputed";
+        });
+    }
+
+    /// <summary>
+    /// Run layout on a graph using the specified mode.
+    /// "auto": multi-level for n>200, flat otherwise.
+    /// "multilevel": always multi-level.
+    /// "flat": always flat FR.
+    /// </summary>
+    private static void RunLayout(GraphModel graph, int iterations, double gravity, string mode)
+    {
+        bool useMultiLevel = mode switch
+        {
+            "multilevel" => true,
+            "flat" => false,
+            _ => graph.NodeCount > 200, // "auto"
+        };
+
+        if (useMultiLevel)
+        {
+            var ml = new MultiLevelLayout(graph)
+            {
+                Width = 1000,
+                Height = 1000,
+                Gravity = gravity,
+                CoarseIterations = Math.Max(iterations, 500),
+                RefineIterations = Math.Min(iterations, 50),
+            };
+            ml.Run();
+        }
+        else
+        {
             var layout = new ForceLayout(graph)
             {
                 Width = 1000,
                 Height = 1000,
                 Iterations = iterations,
+                Gravity = gravity,
             };
-            layout.Randomize();
             layout.Run();
-            win.GraphView.AutoFit();
-            win.GraphView.Invalidate();
-            return "Layout recomputed";
-        });
+        }
     }
 
     private string AutoFitWindow(JsonNode? args)

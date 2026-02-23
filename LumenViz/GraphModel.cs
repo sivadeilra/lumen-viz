@@ -37,6 +37,8 @@ public sealed class GraphModel
     public int[] AdjOffset = Array.Empty<int>();
     /// <summary>Flat neighbor list — use AdjOffset to slice per node.</summary>
     public int[] AdjList = Array.Empty<int>();
+    /// <summary>Edge weight for each adjacency entry (parallel to AdjList).</summary>
+    public double[] AdjWeight = Array.Empty<double>();
 
     public string Title { get; set; } = "";
 
@@ -97,8 +99,10 @@ public sealed class GraphModel
         for (int i = 0; i < n; i++)
             AdjOffset[i + 1] = AdjOffset[i] + Degree[i];
 
-        // Fill adjacency list
-        AdjList = new int[AdjOffset[n]]; // = 2 * M
+        // Fill adjacency list + weights
+        int totalAdj = AdjOffset[n]; // = 2 * M
+        AdjList = new int[totalAdj];
+        AdjWeight = new double[totalAdj];
         var cursor = new int[n];
         Array.Copy(AdjOffset, cursor, n);
 
@@ -106,8 +110,17 @@ public sealed class GraphModel
         {
             int s = EdgeSource[e];
             int t = EdgeTarget[e];
-            AdjList[cursor[s]++] = t;
-            AdjList[cursor[t]++] = s;
+            double w = EdgeWeight[e];
+
+            int cs = cursor[s];
+            AdjList[cs] = t;
+            AdjWeight[cs] = w;
+            cursor[s] = cs + 1;
+
+            int ct = cursor[t];
+            AdjList[ct] = s;
+            AdjWeight[ct] = w;
+            cursor[t] = ct + 1;
         }
     }
 
