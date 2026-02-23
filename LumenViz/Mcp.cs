@@ -939,15 +939,21 @@ public class McpServer
 
         InvokeOnUI(() =>
         {
+            // Load into the currently-active view. The inactive view
+            // will get the graph when SetRenderer() is called.
             if (hierarchy != null)
             {
-                win.GraphView.SetGraphWithHierarchy(graph, hierarchy);
-                win.SkiaView.SetGraphWithHierarchy(graph, hierarchy);
+                if (win.UseSkia)
+                    win.SkiaView.SetGraphWithHierarchy(graph, hierarchy);
+                else
+                    win.GraphView.SetGraphWithHierarchy(graph, hierarchy);
             }
             else
             {
-                win.GraphView.SetGraph(graph);
-                win.SkiaView.SetGraph(graph);
+                if (win.UseSkia)
+                    win.SkiaView.SetGraph(graph);
+                else
+                    win.GraphView.SetGraph(graph);
             }
 
             var c = CountCommunities(graph);
@@ -1068,8 +1074,16 @@ public class McpServer
         var win = GetWindow(args);
         InvokeOnUI(() =>
         {
-            win.GraphView.AutoFit();
-            win.GraphView.Invalidate();
+            if (win.UseSkia)
+            {
+                win.SkiaView.AutoFit();
+                win.SkiaView.Invalidate();
+            }
+            else
+            {
+                win.GraphView.AutoFit();
+                win.GraphView.Invalidate();
+            }
         });
         return "OK";
     }

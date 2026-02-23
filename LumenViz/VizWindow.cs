@@ -88,31 +88,37 @@ public class VizWindow : Form
         if (_useSkia == useSkia) return;
         _useSkia = useSkia;
 
-        // Transfer graph/hierarchy from old renderer to new
+        // Transfer graph/hierarchy from old renderer to new.
+        // IMPORTANT: Make the target view visible FIRST so AutoFit()
+        // (called by SetGraph*) has correct Width/Height.
         if (useSkia)
         {
             var g = _graphView.GetGraph();
             var h = _graphView.GetHierarchy();
+
+            _graphView.Visible = false;
+            _skiaView.Visible = true;
+
             if (g != null && h != null)
                 _skiaView.SetGraphWithHierarchy(g, h);
             else if (g != null)
                 _skiaView.SetGraph(g);
 
-            _graphView.Visible = false;
-            _skiaView.Visible = true;
             _skiaView.Focus();
         }
         else
         {
             var g = _skiaView.GetGraph();
             var h = _skiaView.GetHierarchy();
+
+            _skiaView.Visible = false;
+            _graphView.Visible = true;
+
             if (g != null && h != null)
                 _graphView.SetGraphWithHierarchy(g, h);
             else if (g != null)
                 _graphView.SetGraph(g);
 
-            _skiaView.Visible = false;
-            _graphView.Visible = true;
             _graphView.Focus();
         }
 
