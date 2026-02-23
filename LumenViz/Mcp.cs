@@ -198,6 +198,45 @@ public class McpServer
                 "Show a message box to the user.",
                 Props(("text", "string", "Message body"),
                       ("caption", "string", "Dialog title"))),
+
+            // ── Graph visualization tools ──────────────────────────
+            ToolDef("load_graph",
+                "Load a graph from a Matrix Market (.mtx) file and display it with force-directed layout.",
+                Props(("path", "string", "Absolute path to a .mtx file"))),
+
+            ToolDef("load_graph_with_layout",
+                "Load a graph from a .mtx file and run layout with custom parameters.",
+                Props(("path", "string", "Absolute path to a .mtx file"),
+                      ("iterations", "string", "Number of layout iterations (default 300)"),
+                      ("gravity", "string", "Gravity constant (default 0.05)"))),
+
+            ToolDef("get_graph_info",
+                "Get info about the currently loaded graph (nodes, edges, communities).",
+                Props()),
+
+            ToolDef("set_show_labels",
+                "Toggle node label display.",
+                Props(("show", "string", "true or false"))),
+
+            ToolDef("set_node_radius",
+                "Set the base node radius in pixels.",
+                Props(("radius", "string", "Radius (e.g. 4, 6, 10)"))),
+
+            ToolDef("set_edge_alpha",
+                "Set edge transparency (0.0 = invisible, 1.0 = opaque).",
+                Props(("alpha", "string", "Alpha value 0.0-1.0"))),
+
+            ToolDef("auto_fit",
+                "Re-center and zoom to fit the graph in the view.",
+                Props()),
+
+            ToolDef("rerun_layout",
+                "Re-run force-directed layout on the current graph.",
+                Props(("iterations", "string", "Number of iterations (default 300)"))),
+
+            ToolDef("list_data_files",
+                "List available .mtx data files in c:\\lumen-viz\\data.",
+                Props()),
         };
     }
 
@@ -275,6 +314,73 @@ public class McpServer
                     return "OK";
                 }),
 
+                // ── Graph visualization tools ──────────────────────────
+
+                "load_graph" => LoadGraph(args, iterations: 300, gravity: 0.05),
+
+                "load_graph_with_layout" => LoadGraph(args,
+                    int.TryParse(ArgOr(args, "iterations", "300"), out var it) ? it : 300,
+                    double.TryParse(ArgOr(args, "gravity", "0.05"),
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        out var gv) ? gv : 0.05),
+
+                "get_graph_info" => InvokeOnUI(() =>
+                {
+                    var graph = _form.GraphView.GetGraph();
+                    if (graph == null) return "No graph loaded";
+                    var communities = graph.Nodes.Select(n => n.Community).Distinct().Count();
+                    var info = new JsonObject
+                    {
+                        ["title"] = graph.Title,
+                        ["nodes"] = graph.Nodes.Count,
+                        ["edges"] = graph.Edges.Count,
+                        ["communities"] = communities,
+                    };
+                    return info.ToJsonString();
+                }),
+
+                "set_show_labels" => InvokeOnUI(() =>
+                {
+                    _form.GraphView.ShowLabels = Arg(args, "show")
+                        .Equals("true", StringComparison.OrdinalIgnoreCase);
+                    _form.GraphView.Invalidate();
+                    return "OK";
+                }),
+
+                "set_node_radius" => InvokeOnUI(() =>
+                {
+                    if (float.TryParse(Arg(args, "radius"),
+                        System.Globalization.CultureInfo.InvariantCulture, out float r))
+                    {
+                        _form.GraphView.NodeRadius = r;
+                        _form.GraphView.Invalidate();
+                    }
+                    return "OK";
+                }),
+
+                "set_edge_alpha" => InvokeOnUI(() =>
+                {
+                    if (float.TryParse(Arg(args, "alpha"),
+                        System.Globalization.CultureInfo.InvariantCulture, out float a))
+                    {
+                        _form.GraphView.EdgeAlpha = a;
+                        _form.GraphView.Invalidate();
+                    }
+                    return "OK";
+                }),
+
+                "auto_fit" => InvokeOnUI(() =>
+                {
+                    _form.GraphView.AutoFit();
+                    _form.GraphView.Invalidate();
+                    return "OK";
+                }),
+
+                "rerun_layout" => RerunLayout(
+                    int.TryParse(ArgOr(args, "iterations", "300"), out var ri) ? ri : 300),
+
+                "list_data_files" => ListDataFiles(),
+
                 _ => throw new InvalidOperationException(
                     $"Unknown tool: {toolName}"),
             };
@@ -285,6 +391,86 @@ public class McpServer
         {
             SendToolError(id, ex.Message);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Graph tool helpers
+    // -----------------------------------------------------------------------
+
+    private string LoadGraph(JsonNode? args, int iterations, double gravity)
+    {
+        var path = Arg(args, "path");
+        Log($"    Loading graph from {path}");
+
+        var graph = MatrixMarketReader.ReadFile(path);
+        graph.DetectCommunities();
+
+        var layout = new ForceLayout(graph)
+        {
+            Width = 1000,
+            Height = 1000,
+            Iterations = iterations,
+            Gravity = gravity,
+        };
+        layout.Run();
+
+        InvokeOnUI(() =>
+        {
+            _form.GraphView.SetGraph(graph);
+            var communities = graph.Nodes.Select(n => n.Community).Distinct().Count();
+            _form.SetStatus(
+                $"◇  {graph.Title}  —  {graph.Nodes.Count} nodes, " +
+                $"{graph.Edges.Count} edges, {communities} communities");
+            return 0;
+        });
+
+        var communities2 = graph.Nodes.Select(n => n.Community).Distinct().Count();
+        var info = new JsonObject
+        {
+            ["title"] = graph.Title,
+            ["nodes"] = graph.Nodes.Count,
+            ["edges"] = graph.Edges.Count,
+            ["communities"] = communities2,
+            ["status"] = "loaded and displayed",
+        };
+        return info.ToJsonString();
+    }
+
+    private string RerunLayout(int iterations)
+    {
+        return InvokeOnUI(() =>
+        {
+            var graph = _form.GraphView.GetGraph();
+            if (graph == null) return "No graph loaded";
+
+            var layout = new ForceLayout(graph)
+            {
+                Width = 1000,
+                Height = 1000,
+                Iterations = iterations,
+            };
+            layout.Randomize();
+            layout.Run();
+            _form.GraphView.AutoFit();
+            _form.GraphView.Invalidate();
+            return "Layout recomputed";
+        });
+    }
+
+    private static string ListDataFiles()
+    {
+        var dataDir = @"c:\lumen-viz\data";
+        if (!Directory.Exists(dataDir))
+            return "No data directory found";
+
+        var files = Directory.GetFiles(dataDir, "*.mtx", SearchOption.AllDirectories);
+        var list = new JsonArray();
+        foreach (var f in files)
+        {
+            list.Add(f);
+        }
+        var result = new JsonObject { ["files"] = list };
+        return result.ToJsonString();
     }
 
     // -----------------------------------------------------------------------
