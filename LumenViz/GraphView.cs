@@ -437,6 +437,10 @@ public class GraphView : Control
 
     // ── Painting ────────────────────────────────────────────────────────
 
+    // Reusable screen-coordinate buffers (avoid per-frame allocation)
+    private float[] _screenX = Array.Empty<float>();
+    private float[] _screenY = Array.Empty<float>();
+
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
@@ -458,9 +462,22 @@ public class GraphView : Control
         var px = _graph.NodeX;
         var py = _graph.NodeY;
         var degree = _graph.Degree;
+        var community = _graph.Community;
 
-        // Compute the visible region in screen coords (with generous margin)
-        var viewRect = new RectangleF(-50, -50, Width + 100, Height + 100);
+        // ── Pre-compute all screen coordinates once ────────────────────
+        if (_screenX.Length < n)
+        {
+            _screenX = new float[n];
+            _screenY = new float[n];
+        }
+        for (int i = 0; i < n; i++)
+        {
+            _screenX[i] = (float)(px[i] * _zoom + _pan.X);
+            _screenY[i] = (float)(py[i] * _zoom + _pan.Y);
+        }
+
+        float viewL = -50f, viewT = -50f;
+        float viewR = Width + 50f, viewB = Height + 50f;
 
         // ── Draw parent highlight ──────────────────────────────────────
         if (ShowParentHighlight && _hierarchy != null
@@ -470,24 +487,54 @@ public class GraphView : Control
             DrawParentHighlight(g);
         }
 
-        // ── Draw edges (with off-screen culling) ──────────────────────
+        // ── Draw edges (batched) ──────────────────────────────────────
         int edgeAlpha = Math.Clamp((int)(EdgeAlpha * 255), 10, 255);
         using var edgePen = new Pen(Color.FromArgb(edgeAlpha, 120, 130, 150), 1f);
 
         var es = _graph.EdgeSource;
         var et = _graph.EdgeTarget;
-        for (int ei = 0; ei < _graph.EdgeCount; ei++)
+        int edgeCount = _graph.EdgeCount;
+
+        // Build a line-segment buffer: pairs of points for DrawLines
+        // We use a PointF[] sized for worst case, then trim
+        if (edgeCount > 0)
         {
-            var a = WorldToScreen(px[es[ei]], py[es[ei]]);
-            var b = WorldToScreen(px[et[ei]], py[et[ei]]);
-            // Skip edges where both endpoints are off-screen
-            if (!viewRect.Contains(a) && !viewRect.Contains(b))
+            var lineBuf = new PointF[edgeCount * 2];
+            int lineIdx = 0;
+
+            for (int ei = 0; ei < edgeCount; ei++)
             {
-                // But still draw if the line crosses the viewport
-                if (!LineIntersectsRect(a, b, viewRect))
-                    continue;
+                float ax = _screenX[es[ei]], ay = _screenY[es[ei]];
+                float bx = _screenX[et[ei]], by = _screenY[et[ei]];
+
+                // Cull edges entirely outside the viewport
+                bool aIn = ax >= viewL && ax <= viewR && ay >= viewT && ay <= viewB;
+                bool bIn = bx >= viewL && bx <= viewR && by >= viewT && by <= viewB;
+                if (!aIn && !bIn)
+                {
+                    if (!LineIntersectsRect(
+                        new PointF(ax, ay), new PointF(bx, by),
+                        new RectangleF(viewL, viewT, viewR - viewL, viewB - viewT)))
+                        continue;
+                }
+
+                lineBuf[lineIdx++] = new PointF(ax, ay);
+                lineBuf[lineIdx++] = new PointF(bx, by);
             }
-            g.DrawLine(edgePen, a, b);
+
+            // Draw all visible edges in one batched call
+            if (lineIdx >= 4)
+            {
+                // DrawLines connects consecutive points, but we want disconnected
+                // line segments. Use a loop drawing pairs to avoid false connections.
+                // For n < ~20k segments, the overhead is tolerable.
+                for (int li = 0; li < lineIdx; li += 2)
+                    g.DrawLine(edgePen, lineBuf[li], lineBuf[li + 1]);
+            }
+            else if (lineIdx == 2)
+            {
+                g.DrawLine(edgePen, lineBuf[0], lineBuf[1]);
+            }
         }
 
         // ── Draw selected node glow (only on-screen nodes) ────────────
@@ -498,37 +545,60 @@ public class GraphView : Control
             foreach (int i in _selection)
             {
                 if (i >= n) continue;
-                var pt = WorldToScreen(px[i], py[i]);
-                if (!viewRect.Contains(pt)) continue;
-                g.FillEllipse(glowBrush, pt.X - glowR, pt.Y - glowR, glowR * 2, glowR * 2);
+                float sx = _screenX[i], sy = _screenY[i];
+                if (sx < viewL || sx > viewR || sy < viewT || sy > viewB) continue;
+                g.FillEllipse(glowBrush, sx - glowR, sy - glowR, glowR * 2, glowR * 2);
             }
         }
 
-        // ── Draw nodes (with off-screen culling) ──────────────────────
+        // ── Draw nodes (LOD-aware, off-screen culling) ────────────────
         float r = NodeRadius;
         using var outlinePen = new Pen(Color.FromArgb(200, 255, 255, 255), 1f);
         using var selOutlinePen = new Pen(Color.FromArgb(255, 255, 255, 100), 2f);
-        var community = _graph.Community;
+
+        // LOD: when there are many on-screen nodes, use simpler rendering
+        bool lowDetail = (n > 2000 && _zoom < 1.5f);
+
+        // In low-detail mode, disable anti-aliasing for speed
+        if (lowDetail)
+            g.SmoothingMode = SmoothingMode.None;
 
         int offScreenCount = 0;
         for (int i = 0; i < n; i++)
         {
-            var pt = WorldToScreen(px[i], py[i]);
-            if (!viewRect.Contains(pt)) { offScreenCount++; continue; }
+            float sx = _screenX[i], sy = _screenY[i];
+            if (sx < viewL || sx > viewR || sy < viewT || sy > viewB)
+            {
+                offScreenCount++;
+                continue;
+            }
 
             float nr = r + Math.Min(degree[i] * 0.3f, 6f);
-            g.FillEllipse(_paletteBrushes[community[i] % Palette.Length],
-                pt.X - nr, pt.Y - nr, nr * 2, nr * 2);
+            var brush = _paletteBrushes[community[i] % Palette.Length];
 
-            if (_selection.Contains(i))
-                g.DrawEllipse(selOutlinePen, pt.X - nr, pt.Y - nr, nr * 2, nr * 2);
+            if (lowDetail)
+            {
+                // Fast path: filled rectangles, no outlines
+                g.FillRectangle(brush, sx - nr, sy - nr, nr * 2, nr * 2);
+            }
             else
-                g.DrawEllipse(outlinePen, pt.X - nr, pt.Y - nr, nr * 2, nr * 2);
+            {
+                g.FillEllipse(brush, sx - nr, sy - nr, nr * 2, nr * 2);
+                if (_selection.Contains(i))
+                    g.DrawEllipse(selOutlinePen, sx - nr, sy - nr, nr * 2, nr * 2);
+                else
+                    g.DrawEllipse(outlinePen, sx - nr, sy - nr, nr * 2, nr * 2);
+            }
         }
 
         // ── Draw off-screen indicators at viewport edges ──────────────
-        if (offScreenCount > 0)
-            DrawOffScreenIndicators(g, viewRect);
+        // Skip if too many off-screen (drawing thousands of dots is slow)
+        if (offScreenCount > 0 && offScreenCount < 2000)
+            DrawOffScreenIndicators(g);
+
+        // Restore anti-aliasing for overlays
+        if (lowDetail && AntiAlias)
+            g.SmoothingMode = SmoothingMode.AntiAlias;
 
         // ── Draw labels ────────────────────────────────────────────────
         if (ShowLabels && _zoom > 0.5f)
@@ -539,11 +609,11 @@ public class GraphView : Control
             var labels = _graph.Labels;
             for (int i = 0; i < n; i++)
             {
-                var pt = WorldToScreen(px[i], py[i]);
-                if (!viewRect.Contains(pt)) continue;
+                float sx = _screenX[i], sy = _screenY[i];
+                if (sx < viewL || sx > viewR || sy < viewT || sy > viewB) continue;
 
                 float nr = r + Math.Min(degree[i] * 0.3f, 6f);
-                g.DrawString(labels[i], font, labelBrush, pt.X + nr + 2, pt.Y - 6);
+                g.DrawString(labels[i], font, labelBrush, sx + nr + 2, sy - 6);
             }
         }
 
@@ -573,30 +643,27 @@ public class GraphView : Control
     // ── Off-screen indicators ───────────────────────────────────────────
 
     /// <summary>
-    /// Draw small arrows/dots along the viewport edges to indicate
-    /// where off-screen nodes lie. Groups them into edge bins.
+    /// Draw small dots along the viewport edges to indicate
+    /// where off-screen nodes lie. Uses pre-computed screen coords.
     /// </summary>
-    private void DrawOffScreenIndicators(Graphics g, RectangleF viewRect)
+    private void DrawOffScreenIndicators(Graphics g)
     {
         if (_graph == null) return;
 
         int n = _graph.NodeCount;
-        var px = _graph.NodeX;
-        var py = _graph.NodeY;
-
-        // Bin off-screen nodes into edge regions (8 bins: top, topright, right, etc.)
-        // Simpler: just draw a tiny indicator dot at the clamped edge position
         using var indicatorBrush = new SolidBrush(Color.FromArgb(120, 255, 200, 80));
         float dotR = 3f;
+        float w = Width, h = Height;
 
         for (int i = 0; i < n; i++)
         {
-            var pt = WorldToScreen(px[i], py[i]);
-            if (viewRect.Contains(pt)) continue;
+            float sx = _screenX[i], sy = _screenY[i];
+            if (sx >= -50 && sx <= w + 50 && sy >= -50 && sy <= h + 50)
+                continue;
 
             // Clamp to viewport edge
-            float cx = Math.Clamp(pt.X, 2, Width - 2);
-            float cy = Math.Clamp(pt.Y, 2, Height - 2);
+            float cx = Math.Clamp(sx, 2, w - 2);
+            float cy = Math.Clamp(sy, 2, h - 2);
             g.FillEllipse(indicatorBrush, cx - dotR, cy - dotR, dotR * 2, dotR * 2);
         }
     }
@@ -800,11 +867,11 @@ public class GraphView : Control
         for (int i = 0; i < n; i++)
         {
             int ci = map[i];
-            var pt = WorldToScreen(_graph.NodeX[i], _graph.NodeY[i]);
-            if (pt.X < minXs[ci]) minXs[ci] = pt.X;
-            if (pt.Y < minYs[ci]) minYs[ci] = pt.Y;
-            if (pt.X > maxXs[ci]) maxXs[ci] = pt.X;
-            if (pt.Y > maxYs[ci]) maxYs[ci] = pt.Y;
+            float sx = _screenX[i], sy = _screenY[i];
+            if (sx < minXs[ci]) minXs[ci] = sx;
+            if (sy < minYs[ci]) minYs[ci] = sy;
+            if (sx > maxXs[ci]) maxXs[ci] = sx;
+            if (sy > maxYs[ci]) maxYs[ci] = sy;
             counts[ci]++;
         }
 
