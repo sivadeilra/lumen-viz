@@ -169,9 +169,13 @@ public class VizWindow : Form
 
     private void OnWindowKeyDown(object? sender, KeyEventArgs e)
     {
-        // PgUp/PgDn/Home/End are handled by GraphView.OnKeyDown directly.
+        // Navigation keys handled by GraphView.OnKeyDown directly.
         // Don't double-report those as interaction events.
-        if (e.KeyCode is Keys.PageUp or Keys.PageDown or Keys.Home or Keys.End)
+        if (e.KeyCode is Keys.PageUp or Keys.PageDown or Keys.Home or Keys.End
+            or Keys.Left or Keys.Right or Keys.Up or Keys.Down
+            or Keys.Oemplus or Keys.OemMinus or Keys.Add or Keys.Subtract
+            or Keys.F or Keys.L or Keys.M or Keys.E
+            or Keys.D0 or Keys.D9)
             return;
 
         EnqueueEvent(new JsonObject

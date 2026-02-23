@@ -448,9 +448,9 @@ public class GraphView : Control
         if (graphW < 1) graphW = 1;
         if (graphH < 1) graphH = 1;
 
-        float margin = 40;
+        float margin = 60;
         float viewW = Width - margin * 2;
-        float viewH = Height - margin * 2;
+        float viewH = Height - margin - 50; // top margin + bottom space for HUD/status
         if (viewW < 1) viewW = 1;
         if (viewH < 1) viewH = 1;
 
@@ -797,7 +797,7 @@ public class GraphView : Control
 
         // Minimap position (bottom-right)
         int mmX = Width - MinimapSize - MinimapMargin;
-        int mmY = Height - MinimapSize - MinimapMargin - 24; // above HUD
+        int mmY = Height - MinimapSize - MinimapMargin - 32; // above HUD + status bar
         int mmW = MinimapSize;
         int mmH = MinimapSize;
 
@@ -865,7 +865,7 @@ public class GraphView : Control
         int panelH = LevelsPanelPadTop + levelCount * LevelRowHeight + 8;
         int panelW = LevelsPanelWidth;
         int px = LevelsPanelPadLeft;
-        int py = 28; // below menu strip area
+        int py = 32; // below menu strip area with margin
 
         // Background
         using var bgBrush = new SolidBrush(Color.FromArgb(200, 16, 16, 24));
@@ -1003,6 +1003,12 @@ public class GraphView : Control
             (Height - size.Height) / 2);
     }
 
+    /// <summary>Margin constants for overlay text.</summary>
+    private const int HudMarginX = 10;
+    private const int HudMarginBottom = 6;
+    private const int HintMarginTop = 30;  // below menu strip
+    private const int HintMarginX = 10;
+
     private void DrawHud(Graphics g)
     {
         if (_graph == null) return;
@@ -1024,13 +1030,17 @@ public class GraphView : Control
 
         using var font = new Font("Cascadia Mono", 9f);
         using var brush = new SolidBrush(Color.FromArgb(160, 200, 200, 220));
-        g.DrawString(info, font, brush, 8, Height - 24);
 
+        // Draw HUD at bottom with proper margin above status bar
+        var infoSize = g.MeasureString(info, font);
+        g.DrawString(info, font, brush, HudMarginX, Height - infoSize.Height - HudMarginBottom);
+
+        // Hint text at top-right, below menu strip
         if (_hierarchy != null && _hierarchy.LevelCount > 1)
         {
-            string hint = "PgUp/PgDn: navigate levels  |  Click level panel to jump";
+            string hint = "PgUp/PgDn: levels  |  Home: fit view  |  +/−: zoom  |  Arrows: pan";
             var hintSize = g.MeasureString(hint, font);
-            g.DrawString(hint, font, brush, Width - hintSize.Width - 8, 8);
+            g.DrawString(hint, font, brush, Width - hintSize.Width - HintMarginX, HintMarginTop);
         }
     }
 
@@ -1331,10 +1341,14 @@ public class GraphView : Control
 
     // ── Keyboard ────────────────────────────────────────────────────────
 
+    private const float KeyboardZoomFactor = 1.25f;
+    private const float KeyboardPanStep = 60f;
+
     protected override void OnKeyDown(KeyEventArgs e)
     {
         switch (e.KeyCode)
         {
+            // ── Level navigation ────────────────────────────────────
             case Keys.PageUp:
                 GoCoarser();
                 e.Handled = true;
@@ -1343,15 +1357,62 @@ public class GraphView : Control
                 GoFiner();
                 e.Handled = true;
                 break;
-            case Keys.Home:
+            case Keys.D0 when e.Modifiers == Keys.None:  // 0 = finest
                 SetLevel(0);
                 e.Handled = true;
                 break;
-            case Keys.End:
+            case Keys.D9 when e.Modifiers == Keys.None:  // 9 = coarsest
                 if (_hierarchy != null)
                     SetLevel(_hierarchy.LevelCount - 1);
                 e.Handled = true;
                 break;
+
+            // ── View navigation ─────────────────────────────────────
+            case Keys.Home:     // re-center / fit view
+            case Keys.F:        // also F for "fit"
+                AutoFit();
+                Invalidate();
+                e.Handled = true;
+                break;
+            case Keys.End:      // jump to coarsest level
+                if (_hierarchy != null)
+                    SetLevel(_hierarchy.LevelCount - 1);
+                e.Handled = true;
+                break;
+
+            // ── Zoom ────────────────────────────────────────────────
+            case Keys.Oemplus or Keys.Add:   // + or = key
+                ZoomCenter(KeyboardZoomFactor);
+                e.Handled = true;
+                break;
+            case Keys.OemMinus or Keys.Subtract:  // - key
+                ZoomCenter(1f / KeyboardZoomFactor);
+                e.Handled = true;
+                break;
+
+            // ── Pan with arrow keys ─────────────────────────────────
+            case Keys.Left:
+                _pan.X += KeyboardPanStep;
+                Invalidate();
+                e.Handled = true;
+                break;
+            case Keys.Right:
+                _pan.X -= KeyboardPanStep;
+                Invalidate();
+                e.Handled = true;
+                break;
+            case Keys.Up:
+                _pan.Y += KeyboardPanStep;
+                Invalidate();
+                e.Handled = true;
+                break;
+            case Keys.Down:
+                _pan.Y -= KeyboardPanStep;
+                Invalidate();
+                e.Handled = true;
+                break;
+
+            // ── Selection ───────────────────────────────────────────
             case Keys.Escape:
                 ClearSelection();
                 e.Handled = true;
@@ -1360,15 +1421,43 @@ public class GraphView : Control
                 SelectAll();
                 e.Handled = true;
                 break;
+
+            // ── Toggles ─────────────────────────────────────────────
+            case Keys.L when e.Modifiers == Keys.None:   // L = labels
+                ShowLabels = !ShowLabels;
+                Invalidate();
+                e.Handled = true;
+                break;
+            case Keys.M when e.Modifiers == Keys.None:   // M = minimap
+                ShowMinimap = !ShowMinimap;
+                Invalidate();
+                e.Handled = true;
+                break;
+            case Keys.E when e.Modifiers == Keys.None:   // E = edges
+                ShowEdges = !ShowEdges;
+                Invalidate();
+                e.Handled = true;
+                break;
         }
         base.OnKeyDown(e);
     }
 
+    /// <summary>Zoom centered on the control's midpoint.</summary>
+    private void ZoomCenter(float factor)
+    {
+        float cx = Width / 2f, cy = Height / 2f;
+        _pan.X = cx - (cx - _pan.X) * factor;
+        _pan.Y = cy - (cy - _pan.Y) * factor;
+        _zoom *= factor;
+        Invalidate();
+    }
+
     protected override bool IsInputKey(Keys keyData)
     {
-        return keyData switch
+        return (keyData & Keys.KeyCode) switch
         {
-            Keys.PageUp or Keys.PageDown or Keys.Home or Keys.End => true,
+            Keys.PageUp or Keys.PageDown or Keys.Home or Keys.End
+                or Keys.Left or Keys.Right or Keys.Up or Keys.Down => true,
             _ => base.IsInputKey(keyData),
         };
     }
