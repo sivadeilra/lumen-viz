@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Drawing.Drawing2D;
 
 namespace LumenViz;
@@ -97,6 +98,53 @@ public class GraphView : Control
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool ShowLevelsPanel { get; set; } = true;
+
+    // ── Render toggles (for performance experiments) ────────────────────
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool ShowEdges { get; set; } = true;
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool ShowNodes { get; set; } = true;
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool ShowOutlines { get; set; } = true;
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool ShowOffScreenIndicators { get; set; } = true;
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool ShowSelectionGlow { get; set; } = true;
+
+    /// <summary>LOD override: "auto" (default), "low" (force rectangles), "high" (force ellipses+outlines).</summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public string LodMode { get; set; } = "auto";
+
+    // ── Performance instrumentation ─────────────────────────────────────
+    private readonly Stopwatch _frameSw = new();
+    private readonly Stopwatch _phaseSw = new();
+    private int _perfFrameCount;
+    private const double PerfAlpha = 0.1; // EMA smoothing factor
+
+    // Last-frame + exponential moving average per phase
+    private double _lastFrameMs, _avgFrameMs;
+    private double _lastPrecomputeMs, _avgPrecomputeMs;
+    private double _lastEdgesMs, _avgEdgesMs;
+    private double _lastNodesMs, _avgNodesMs;
+    private double _lastParentHighlightMs, _avgParentHighlightMs;
+    private double _lastMinimapMs, _avgMinimapMs;
+    private double _lastLevelsPanelMs, _avgLevelsPanelMs;
+    private double _lastOffScreenMs, _avgOffScreenMs;
+    private double _lastLabelsMs, _avgLabelsMs;
+    private double _lastHudMs, _avgHudMs;
+    private double _lastSelGlowMs, _avgSelGlowMs;
+
+    private void UpdateEma(ref double avg, double sample)
+    {
+        if (_perfFrameCount <= 1)
+            avg = sample;
+        else
+            avg = avg * (1 - PerfAlpha) + sample * PerfAlpha;
+    }
 
     private static readonly Color[] Palette = new[]
     {
@@ -443,6 +491,7 @@ public class GraphView : Control
 
     protected override void OnPaint(PaintEventArgs e)
     {
+        _frameSw.Restart();
         var g = e.Graphics;
         g.Clear(BackgroundColor);
 
@@ -465,6 +514,7 @@ public class GraphView : Control
         var community = _graph.Community;
 
         // ── Pre-compute all screen coordinates once ────────────────────
+        _phaseSw.Restart();
         if (_screenX.Length < n)
         {
             _screenX = new float[n];
@@ -475,70 +525,72 @@ public class GraphView : Control
             _screenX[i] = (float)(px[i] * _zoom + _pan.X);
             _screenY[i] = (float)(py[i] * _zoom + _pan.Y);
         }
+        double precomputeMs = _phaseSw.Elapsed.TotalMilliseconds;
 
         float viewL = -50f, viewT = -50f;
         float viewR = Width + 50f, viewB = Height + 50f;
 
         // ── Draw parent highlight ──────────────────────────────────────
+        _phaseSw.Restart();
         if (ShowParentHighlight && _hierarchy != null
             && _currentLevel < _hierarchy.LevelCount - 1
             && _animTimer == null)
         {
             DrawParentHighlight(g);
         }
+        double parentHighlightMs = _phaseSw.Elapsed.TotalMilliseconds;
 
         // ── Draw edges (batched) ──────────────────────────────────────
-        int edgeAlpha = Math.Clamp((int)(EdgeAlpha * 255), 10, 255);
-        using var edgePen = new Pen(Color.FromArgb(edgeAlpha, 120, 130, 150), 1f);
-
-        var es = _graph.EdgeSource;
-        var et = _graph.EdgeTarget;
-        int edgeCount = _graph.EdgeCount;
-
-        // Build a line-segment buffer: pairs of points for DrawLines
-        // We use a PointF[] sized for worst case, then trim
-        if (edgeCount > 0)
+        _phaseSw.Restart();
+        if (ShowEdges)
         {
-            var lineBuf = new PointF[edgeCount * 2];
-            int lineIdx = 0;
+            int edgeAlpha = Math.Clamp((int)(EdgeAlpha * 255), 10, 255);
+            using var edgePen = new Pen(Color.FromArgb(edgeAlpha, 120, 130, 150), 1f);
 
-            for (int ei = 0; ei < edgeCount; ei++)
+            var es = _graph.EdgeSource;
+            var et = _graph.EdgeTarget;
+            int edgeCount = _graph.EdgeCount;
+
+            if (edgeCount > 0)
             {
-                float ax = _screenX[es[ei]], ay = _screenY[es[ei]];
-                float bx = _screenX[et[ei]], by = _screenY[et[ei]];
+                var lineBuf = new PointF[edgeCount * 2];
+                int lineIdx = 0;
 
-                // Cull edges entirely outside the viewport
-                bool aIn = ax >= viewL && ax <= viewR && ay >= viewT && ay <= viewB;
-                bool bIn = bx >= viewL && bx <= viewR && by >= viewT && by <= viewB;
-                if (!aIn && !bIn)
+                for (int ei = 0; ei < edgeCount; ei++)
                 {
-                    if (!LineIntersectsRect(
-                        new PointF(ax, ay), new PointF(bx, by),
-                        new RectangleF(viewL, viewT, viewR - viewL, viewB - viewT)))
-                        continue;
+                    float ax = _screenX[es[ei]], ay = _screenY[es[ei]];
+                    float bx = _screenX[et[ei]], by = _screenY[et[ei]];
+
+                    bool aIn = ax >= viewL && ax <= viewR && ay >= viewT && ay <= viewB;
+                    bool bIn = bx >= viewL && bx <= viewR && by >= viewT && by <= viewB;
+                    if (!aIn && !bIn)
+                    {
+                        if (!LineIntersectsRect(
+                            new PointF(ax, ay), new PointF(bx, by),
+                            new RectangleF(viewL, viewT, viewR - viewL, viewB - viewT)))
+                            continue;
+                    }
+
+                    lineBuf[lineIdx++] = new PointF(ax, ay);
+                    lineBuf[lineIdx++] = new PointF(bx, by);
                 }
 
-                lineBuf[lineIdx++] = new PointF(ax, ay);
-                lineBuf[lineIdx++] = new PointF(bx, by);
-            }
-
-            // Draw all visible edges in one batched call
-            if (lineIdx >= 4)
-            {
-                // DrawLines connects consecutive points, but we want disconnected
-                // line segments. Use a loop drawing pairs to avoid false connections.
-                // For n < ~20k segments, the overhead is tolerable.
-                for (int li = 0; li < lineIdx; li += 2)
-                    g.DrawLine(edgePen, lineBuf[li], lineBuf[li + 1]);
-            }
-            else if (lineIdx == 2)
-            {
-                g.DrawLine(edgePen, lineBuf[0], lineBuf[1]);
+                if (lineIdx >= 4)
+                {
+                    for (int li = 0; li < lineIdx; li += 2)
+                        g.DrawLine(edgePen, lineBuf[li], lineBuf[li + 1]);
+                }
+                else if (lineIdx == 2)
+                {
+                    g.DrawLine(edgePen, lineBuf[0], lineBuf[1]);
+                }
             }
         }
+        double edgesMs = _phaseSw.Elapsed.TotalMilliseconds;
 
         // ── Draw selected node glow (only on-screen nodes) ────────────
-        if (_selection.Count > 0)
+        _phaseSw.Restart();
+        if (ShowSelectionGlow && _selection.Count > 0)
         {
             using var glowBrush = new SolidBrush(Color.FromArgb(60, 255, 255, 100));
             float glowR = NodeRadius + 10;
@@ -550,57 +602,69 @@ public class GraphView : Control
                 g.FillEllipse(glowBrush, sx - glowR, sy - glowR, glowR * 2, glowR * 2);
             }
         }
+        double selGlowMs = _phaseSw.Elapsed.TotalMilliseconds;
 
         // ── Draw nodes (LOD-aware, off-screen culling) ────────────────
+        _phaseSw.Restart();
         float r = NodeRadius;
         using var outlinePen = new Pen(Color.FromArgb(200, 255, 255, 255), 1f);
         using var selOutlinePen = new Pen(Color.FromArgb(255, 255, 255, 100), 2f);
 
-        // LOD: when there are many on-screen nodes, use simpler rendering
-        bool lowDetail = (n > 2000 && _zoom < 1.5f);
+        // LOD determination with override
+        bool lowDetail;
+        if (LodMode == "low") lowDetail = true;
+        else if (LodMode == "high") lowDetail = false;
+        else lowDetail = (n > 2000 && _zoom < 1.5f); // auto
 
-        // In low-detail mode, disable anti-aliasing for speed
         if (lowDetail)
             g.SmoothingMode = SmoothingMode.None;
 
         int offScreenCount = 0;
-        for (int i = 0; i < n; i++)
+        if (ShowNodes)
         {
-            float sx = _screenX[i], sy = _screenY[i];
-            if (sx < viewL || sx > viewR || sy < viewT || sy > viewB)
+            for (int i = 0; i < n; i++)
             {
-                offScreenCount++;
-                continue;
-            }
+                float sx = _screenX[i], sy = _screenY[i];
+                if (sx < viewL || sx > viewR || sy < viewT || sy > viewB)
+                {
+                    offScreenCount++;
+                    continue;
+                }
 
-            float nr = r + Math.Min(degree[i] * 0.3f, 6f);
-            var brush = _paletteBrushes[community[i] % Palette.Length];
+                float nr = r + Math.Min(degree[i] * 0.3f, 6f);
+                var brush = _paletteBrushes[community[i] % Palette.Length];
 
-            if (lowDetail)
-            {
-                // Fast path: filled rectangles, no outlines
-                g.FillRectangle(brush, sx - nr, sy - nr, nr * 2, nr * 2);
-            }
-            else
-            {
-                g.FillEllipse(brush, sx - nr, sy - nr, nr * 2, nr * 2);
-                if (_selection.Contains(i))
-                    g.DrawEllipse(selOutlinePen, sx - nr, sy - nr, nr * 2, nr * 2);
+                if (lowDetail)
+                {
+                    g.FillRectangle(brush, sx - nr, sy - nr, nr * 2, nr * 2);
+                }
                 else
-                    g.DrawEllipse(outlinePen, sx - nr, sy - nr, nr * 2, nr * 2);
+                {
+                    g.FillEllipse(brush, sx - nr, sy - nr, nr * 2, nr * 2);
+                    if (ShowOutlines)
+                    {
+                        if (_selection.Contains(i))
+                            g.DrawEllipse(selOutlinePen, sx - nr, sy - nr, nr * 2, nr * 2);
+                        else
+                            g.DrawEllipse(outlinePen, sx - nr, sy - nr, nr * 2, nr * 2);
+                    }
+                }
             }
         }
+        double nodesMs = _phaseSw.Elapsed.TotalMilliseconds;
 
         // ── Draw off-screen indicators at viewport edges ──────────────
-        // Skip if too many off-screen (drawing thousands of dots is slow)
-        if (offScreenCount > 0 && offScreenCount < 2000)
+        _phaseSw.Restart();
+        if (ShowOffScreenIndicators && offScreenCount > 0 && offScreenCount < 2000)
             DrawOffScreenIndicators(g);
+        double offScreenMs = _phaseSw.Elapsed.TotalMilliseconds;
 
         // Restore anti-aliasing for overlays
         if (lowDetail && AntiAlias)
             g.SmoothingMode = SmoothingMode.AntiAlias;
 
         // ── Draw labels ────────────────────────────────────────────────
+        _phaseSw.Restart();
         if (ShowLabels && _zoom > 0.5f)
         {
             using var font = new Font("Segoe UI", 8f);
@@ -616,6 +680,7 @@ public class GraphView : Control
                 g.DrawString(labels[i], font, labelBrush, sx + nr + 2, sy - 6);
             }
         }
+        double labelsMs = _phaseSw.Elapsed.TotalMilliseconds;
 
         // ── Draw selection rectangle ───────────────────────────────────
         if (_selecting)
@@ -629,15 +694,47 @@ public class GraphView : Control
         }
 
         // ── Draw minimap (bottom-right) ────────────────────────────────
+        _phaseSw.Restart();
         if (ShowMinimap)
             DrawMinimap(g);
+        double minimapMs = _phaseSw.Elapsed.TotalMilliseconds;
 
         // ── Draw coarsening levels panel (top-left) ────────────────────
+        _phaseSw.Restart();
         if (ShowLevelsPanel && _hierarchy != null && _hierarchy.LevelCount > 1)
             DrawLevelsPanel(g);
+        double levelsPanelMs = _phaseSw.Elapsed.TotalMilliseconds;
 
         // ── HUD ────────────────────────────────────────────────────────
+        _phaseSw.Restart();
         DrawHud(g);
+        double hudMs = _phaseSw.Elapsed.TotalMilliseconds;
+
+        // ── Record performance stats ───────────────────────────────────
+        double frameMs = _frameSw.Elapsed.TotalMilliseconds;
+        _perfFrameCount++;
+        _lastFrameMs = frameMs;
+        _lastPrecomputeMs = precomputeMs;
+        _lastEdgesMs = edgesMs;
+        _lastNodesMs = nodesMs;
+        _lastParentHighlightMs = parentHighlightMs;
+        _lastMinimapMs = minimapMs;
+        _lastLevelsPanelMs = levelsPanelMs;
+        _lastOffScreenMs = offScreenMs;
+        _lastLabelsMs = labelsMs;
+        _lastHudMs = hudMs;
+        _lastSelGlowMs = selGlowMs;
+        UpdateEma(ref _avgFrameMs, frameMs);
+        UpdateEma(ref _avgPrecomputeMs, precomputeMs);
+        UpdateEma(ref _avgEdgesMs, edgesMs);
+        UpdateEma(ref _avgNodesMs, nodesMs);
+        UpdateEma(ref _avgParentHighlightMs, parentHighlightMs);
+        UpdateEma(ref _avgMinimapMs, minimapMs);
+        UpdateEma(ref _avgLevelsPanelMs, levelsPanelMs);
+        UpdateEma(ref _avgOffScreenMs, offScreenMs);
+        UpdateEma(ref _avgLabelsMs, labelsMs);
+        UpdateEma(ref _avgHudMs, hudMs);
+        UpdateEma(ref _avgSelGlowMs, selGlowMs);
     }
 
     // ── Off-screen indicators ───────────────────────────────────────────
@@ -921,6 +1018,10 @@ public class GraphView : Control
             else if (_currentLevel == _hierarchy.LevelCount - 1) info += " (coarsest)";
         }
 
+        // Frame time (show average after warm-up)
+        if (_perfFrameCount > 3)
+            info += $"  |  {_avgFrameMs:F1}ms";
+
         using var font = new Font("Cascadia Mono", 9f);
         using var brush = new SolidBrush(Color.FromArgb(160, 200, 200, 220));
         g.DrawString(info, font, brush, 8, Height - 24);
@@ -931,6 +1032,60 @@ public class GraphView : Control
             var hintSize = g.MeasureString(hint, font);
             g.DrawString(hint, font, brush, Width - hintSize.Width - 8, 8);
         }
+    }
+
+    // ── Performance stats query ─────────────────────────────────────────
+
+    /// <summary>
+    /// Returns a dictionary of performance stats for MCP querying.
+    /// All times in milliseconds.
+    /// </summary>
+    public Dictionary<string, object> GetRenderStats()
+    {
+        return new Dictionary<string, object>
+        {
+            ["frame_count"] = _perfFrameCount,
+            ["last_frame_ms"] = Math.Round(_lastFrameMs, 3),
+            ["avg_frame_ms"] = Math.Round(_avgFrameMs, 3),
+            ["phases"] = new Dictionary<string, object>
+            {
+                ["precompute"] = new { last = Math.Round(_lastPrecomputeMs, 3), avg = Math.Round(_avgPrecomputeMs, 3) },
+                ["parent_highlight"] = new { last = Math.Round(_lastParentHighlightMs, 3), avg = Math.Round(_avgParentHighlightMs, 3) },
+                ["edges"] = new { last = Math.Round(_lastEdgesMs, 3), avg = Math.Round(_avgEdgesMs, 3) },
+                ["selection_glow"] = new { last = Math.Round(_lastSelGlowMs, 3), avg = Math.Round(_avgSelGlowMs, 3) },
+                ["nodes"] = new { last = Math.Round(_lastNodesMs, 3), avg = Math.Round(_avgNodesMs, 3) },
+                ["off_screen"] = new { last = Math.Round(_lastOffScreenMs, 3), avg = Math.Round(_avgOffScreenMs, 3) },
+                ["labels"] = new { last = Math.Round(_lastLabelsMs, 3), avg = Math.Round(_avgLabelsMs, 3) },
+                ["minimap"] = new { last = Math.Round(_lastMinimapMs, 3), avg = Math.Round(_avgMinimapMs, 3) },
+                ["levels_panel"] = new { last = Math.Round(_lastLevelsPanelMs, 3), avg = Math.Round(_avgLevelsPanelMs, 3) },
+                ["hud"] = new { last = Math.Round(_lastHudMs, 3), avg = Math.Round(_avgHudMs, 3) },
+            },
+            ["settings"] = new Dictionary<string, object>
+            {
+                ["anti_alias"] = AntiAlias,
+                ["show_edges"] = ShowEdges,
+                ["show_nodes"] = ShowNodes,
+                ["show_outlines"] = ShowOutlines,
+                ["show_labels"] = ShowLabels,
+                ["show_minimap"] = ShowMinimap,
+                ["show_levels_panel"] = ShowLevelsPanel,
+                ["show_parent_highlight"] = ShowParentHighlight,
+                ["show_off_screen_indicators"] = ShowOffScreenIndicators,
+                ["show_selection_glow"] = ShowSelectionGlow,
+                ["lod_mode"] = LodMode,
+                ["node_radius"] = NodeRadius,
+                ["edge_alpha"] = EdgeAlpha,
+            },
+        };
+    }
+
+    /// <summary>Resets the EMA counters so the next measurements start fresh.</summary>
+    public void ResetRenderStats()
+    {
+        _perfFrameCount = 0;
+        _avgFrameMs = _avgPrecomputeMs = _avgEdgesMs = _avgNodesMs = 0;
+        _avgParentHighlightMs = _avgMinimapMs = _avgLevelsPanelMs = 0;
+        _avgOffScreenMs = _avgLabelsMs = _avgHudMs = _avgSelGlowMs = 0;
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────

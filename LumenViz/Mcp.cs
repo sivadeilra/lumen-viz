@@ -368,6 +368,29 @@ public class McpServer
                 Props(
                     ("window", "string", "Window ID", true),
                     ("level", "string", "Target level (0 = finest)", true))),
+
+            // ── Performance instrumentation ─────────────────────────────
+            ToolDef("get_render_stats",
+                "Get per-phase rendering performance stats (ms) for a window. " +
+                "Returns last-frame and EMA average for each phase, plus current settings. " +
+                "Trigger a repaint first if you want fresh numbers.",
+                PropsReq(("window", "string", "Window ID"))),
+
+            ToolDef("reset_render_stats",
+                "Reset the EMA counters so measurements start fresh. " +
+                "Call before starting an experiment to get clean averages.",
+                PropsReq(("window", "string", "Window ID"))),
+
+            ToolDef("set_render_option",
+                "Set a boolean or string rendering option for experiments. " +
+                "Options: anti_alias, show_edges, show_nodes, show_outlines, show_labels, " +
+                "show_minimap, show_levels_panel, show_parent_highlight, " +
+                "show_off_screen_indicators, show_selection_glow (all bool: true/false), " +
+                "lod_mode (string: auto/low/high).",
+                Props(
+                    ("window", "string", "Window ID", true),
+                    ("option", "string", "Option name (e.g. show_edges)", true),
+                    ("value", "string", "Option value (true/false or string)", true))),
         };
     }
 
@@ -441,6 +464,11 @@ public class McpServer
                 // ── Coarsening levels ──────────────────────────────────
                 "get_coarse_levels" => GetCoarseLevels(args),
                 "set_coarse_level" => SetCoarseLevel(args),
+
+                // ── Performance instrumentation ───────────────────────────
+                "get_render_stats" => GetRenderStats(args),
+                "reset_render_stats" => ResetRenderStats(args),
+                "set_render_option" => SetRenderOption(args),
 
                 _ => throw new InvalidOperationException(
                     $"Unknown tool: {toolName}"),
@@ -548,6 +576,11 @@ public class McpServer
                     info["current_level"] = win.GraphView.CurrentLevel;
                 }
             }
+
+            // Include render performance stats
+            var stats = win.GraphView.GetRenderStats();
+            info["render_stats"] = JsonSerializer.SerializeToNode(stats);
+
             return info.ToJsonString();
         });
     }
@@ -764,6 +797,72 @@ public class McpServer
     }
 
     // -----------------------------------------------------------------------
+    // Performance instrumentation tools
+    // -----------------------------------------------------------------------
+
+    private string GetRenderStats(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        return InvokeOnUI(() =>
+        {
+            var stats = win.GraphView.GetRenderStats();
+            return System.Text.Json.JsonSerializer.Serialize(stats,
+                new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        });
+    }
+
+    private string ResetRenderStats(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        return InvokeOnUI(() =>
+        {
+            win.GraphView.ResetRenderStats();
+            win.GraphView.Invalidate(); // trigger fresh paint
+            return "Render stats reset. Next paint will start fresh EMA.";
+        });
+    }
+
+    private string SetRenderOption(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        string option = Arg(args, "option");
+        string value = Arg(args, "value");
+
+        return InvokeOnUI(() =>
+        {
+            var gv = win.GraphView;
+            bool boolVal = value.Equals("true", StringComparison.OrdinalIgnoreCase)
+                || value == "1" || value.Equals("yes", StringComparison.OrdinalIgnoreCase);
+
+            switch (option)
+            {
+                case "anti_alias": gv.AntiAlias = boolVal; break;
+                case "show_edges": gv.ShowEdges = boolVal; break;
+                case "show_nodes": gv.ShowNodes = boolVal; break;
+                case "show_outlines": gv.ShowOutlines = boolVal; break;
+                case "show_labels": gv.ShowLabels = boolVal; break;
+                case "show_minimap": gv.ShowMinimap = boolVal; break;
+                case "show_levels_panel": gv.ShowLevelsPanel = boolVal; break;
+                case "show_parent_highlight": gv.ShowParentHighlight = boolVal; break;
+                case "show_off_screen_indicators": gv.ShowOffScreenIndicators = boolVal; break;
+                case "show_selection_glow": gv.ShowSelectionGlow = boolVal; break;
+                case "lod_mode":
+                    if (value is "auto" or "low" or "high")
+                        gv.LodMode = value;
+                    else
+                        return $"Invalid lod_mode value: {value}. Use auto, low, or high.";
+                    break;
+                default:
+                    return $"Unknown option: {option}";
+            }
+
+            gv.ResetRenderStats(); // fresh stats after changing a setting
+            gv.Invalidate();
+            return $"Set {option}={value}";
+        });
+    }
+
+    // -----------------------------------------------------------------------
     // Process control
     // -----------------------------------------------------------------------
 
@@ -975,8 +1074,114 @@ public class McpServer
     {
         var win = GetWindow(args);
         var text = Arg(args, "text");
+
+        // Command channel: "!render ..." for perf experiments
+        if (text.StartsWith("!render ", StringComparison.OrdinalIgnoreCase))
+        {
+            var cmd = text.Substring(8).Trim();
+            return HandleRenderCommand(win, cmd);
+        }
+
         InvokeOnUI(() => win.SetStatus(text));
         return "OK";
+    }
+
+    /// <summary>
+    /// Dispatch render commands via set_label_text (since MCP client caches tool list).
+    /// Commands: "stats", "reset", "set OPTION VALUE", "warmup N"
+    /// </summary>
+    private string HandleRenderCommand(VizWindow win, string cmd)
+    {
+        if (cmd.Equals("stats", StringComparison.OrdinalIgnoreCase))
+            return GetRenderStats(win);
+
+        if (cmd.Equals("reset", StringComparison.OrdinalIgnoreCase))
+            return ResetRenderStats(win);
+
+        if (cmd.StartsWith("set ", StringComparison.OrdinalIgnoreCase))
+        {
+            var parts = cmd.Substring(4).Trim().Split(' ', 2);
+            if (parts.Length == 2)
+                return SetRenderOptionDirect(win, parts[0].Trim(), parts[1].Trim());
+            return "Usage: !render set OPTION VALUE";
+        }
+
+        if (cmd.StartsWith("warmup", StringComparison.OrdinalIgnoreCase))
+        {
+            // Trigger N repaints for warm-up, then return stats
+            var parts = cmd.Split(' ', 2);
+            int count = parts.Length > 1 && int.TryParse(parts[1], out var c) ? c : 20;
+            return InvokeOnUI(() =>
+            {
+                var gv = win.GraphView;
+                gv.ResetRenderStats();
+                for (int i = 0; i < count; i++)
+                {
+                    gv.Refresh(); // synchronous paint
+                }
+                var stats = gv.GetRenderStats();
+                return JsonSerializer.Serialize(stats,
+                    new JsonSerializerOptions { WriteIndented = true });
+            });
+        }
+
+        return "Unknown render command. Use: stats, reset, set OPTION VALUE, warmup [N]";
+    }
+
+    private string GetRenderStats(VizWindow win)
+    {
+        return InvokeOnUI(() =>
+        {
+            var stats = win.GraphView.GetRenderStats();
+            return JsonSerializer.Serialize(stats,
+                new JsonSerializerOptions { WriteIndented = true });
+        });
+    }
+
+    private string ResetRenderStats(VizWindow win)
+    {
+        return InvokeOnUI(() =>
+        {
+            win.GraphView.ResetRenderStats();
+            win.GraphView.Invalidate();
+            return "Render stats reset.";
+        });
+    }
+
+    private string SetRenderOptionDirect(VizWindow win, string option, string value)
+    {
+        return InvokeOnUI(() =>
+        {
+            var gv = win.GraphView;
+            bool boolVal = value.Equals("true", StringComparison.OrdinalIgnoreCase)
+                || value == "1" || value.Equals("yes", StringComparison.OrdinalIgnoreCase);
+
+            switch (option)
+            {
+                case "anti_alias": gv.AntiAlias = boolVal; break;
+                case "show_edges": gv.ShowEdges = boolVal; break;
+                case "show_nodes": gv.ShowNodes = boolVal; break;
+                case "show_outlines": gv.ShowOutlines = boolVal; break;
+                case "show_labels": gv.ShowLabels = boolVal; break;
+                case "show_minimap": gv.ShowMinimap = boolVal; break;
+                case "show_levels_panel": gv.ShowLevelsPanel = boolVal; break;
+                case "show_parent_highlight": gv.ShowParentHighlight = boolVal; break;
+                case "show_off_screen_indicators": gv.ShowOffScreenIndicators = boolVal; break;
+                case "show_selection_glow": gv.ShowSelectionGlow = boolVal; break;
+                case "lod_mode":
+                    if (value is "auto" or "low" or "high")
+                        gv.LodMode = value;
+                    else
+                        return $"Invalid lod_mode: {value}. Use auto, low, high.";
+                    break;
+                default:
+                    return $"Unknown option: {option}";
+            }
+
+            gv.ResetRenderStats();
+            gv.Invalidate();
+            return $"Set {option}={value}";
+        });
     }
 
     private string SetLabelColor(JsonNode? args)
