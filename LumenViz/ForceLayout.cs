@@ -154,9 +154,15 @@ public class ForceLayout
                     py[i] += dy[i] * scale;
                 }
 
-                // Keep within bounds (soft constraint)
-                px[i] = Math.Clamp(px[i], 10, Width - 10);
-                py[i] = Math.Clamp(py[i], 10, Height - 10);
+                // Soft pull toward center — no hard clamping.
+                // Nodes that drift far out are gently pulled back,
+                // but never snapped to a wall.
+                double margin = 50;
+                double pullStrength = 0.1;
+                if (px[i] < margin)       px[i] += (margin - px[i]) * pullStrength;
+                if (px[i] > Width - margin)  px[i] -= (px[i] - (Width - margin)) * pullStrength;
+                if (py[i] < margin)       py[i] += (margin - py[i]) * pullStrength;
+                if (py[i] > Height - margin) py[i] -= (py[i] - (Height - margin)) * pullStrength;
             }
 
             temp -= cooling;

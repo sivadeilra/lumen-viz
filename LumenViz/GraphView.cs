@@ -7,7 +7,8 @@ namespace LumenViz;
 /// Custom WinForms control that renders a graph with force-directed layout.
 /// Supports zoom, pan, community coloring, node labels, rubber-band
 /// node selection, coarsening level navigation with animated transitions,
-/// and parent-child relationship highlighting between adjacent levels.
+/// parent-child relationship highlighting, a minimap, off-screen node
+/// culling with edge indicators, and a clickable coarsening levels panel.
 /// </summary>
 public class GraphView : Control
 {
@@ -42,16 +43,27 @@ public class GraphView : Control
     /// <summary>Fired when the coarsening level changes.</summary>
     public event Action? LevelChanged;
 
+    // ── Coarsening levels panel (top-left overlay) ──────────────────────
+    private const int LevelsPanelWidth = 260;
+    private const int LevelRowHeight = 20;
+    private const int LevelsPanelPadTop = 28;   // below menu strip
+    private const int LevelsPanelPadLeft = 6;
+    private int _hoveredLevelRow = -1;           // for hover highlight
+
     // ── Animation ───────────────────────────────────────────────────────
     private System.Windows.Forms.Timer? _animTimer;
-    private double[]? _animFromX, _animFromY;  // start positions
-    private double[]? _animToX, _animToY;      // target positions
-    private int[]? _animMapping;               // old→new index mapping
+    private double[]? _animFromX, _animFromY;
+    private double[]? _animToX, _animToY;
+    private int[]? _animMapping;
     private int _animFrame;
     private const int AnimFrames = 20;
     private const int AnimIntervalMs = 16; // ~60 fps
-    private bool _animatingUp; // true = coarsening, false = refining
+    private bool _animatingUp;
     private int _animTargetLevel;
+
+    // ── Minimap ─────────────────────────────────────────────────────────
+    private const int MinimapSize = 160;
+    private const int MinimapMargin = 8;
 
     // ── Visual settings ─────────────────────────────────────────────────
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -69,31 +81,31 @@ public class GraphView : Control
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public Color BackgroundColor { get; set; } = Color.FromArgb(24, 24, 32);
 
-    /// <summary>Show parent-child relationships to next coarser level.</summary>
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool ShowParentHighlight { get; set; } = true;
 
-    /// <summary>
-    /// Community palette — distinguishable, saturated colors that look good
-    /// on a dark background.
-    /// </summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool ShowMinimap { get; set; } = true;
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool ShowLevelsPanel { get; set; } = true;
+
     private static readonly Color[] Palette = new[]
     {
-        Color.FromArgb(102, 194, 255),  // sky blue
-        Color.FromArgb(255, 128, 102),  // coral
-        Color.FromArgb(128, 230, 128),  // leaf green
-        Color.FromArgb(255, 204, 77),   // amber
-        Color.FromArgb(204, 153, 255),  // lavender
-        Color.FromArgb(255, 153, 204),  // pink
-        Color.FromArgb(102, 230, 204),  // teal
-        Color.FromArgb(255, 179, 102),  // orange
-        Color.FromArgb(153, 204, 255),  // powder blue
-        Color.FromArgb(230, 230, 128),  // lime
-        Color.FromArgb(204, 128, 255),  // violet
-        Color.FromArgb(128, 204, 179),  // sage
+        Color.FromArgb(102, 194, 255),
+        Color.FromArgb(255, 128, 102),
+        Color.FromArgb(128, 230, 128),
+        Color.FromArgb(255, 204, 77),
+        Color.FromArgb(204, 153, 255),
+        Color.FromArgb(255, 153, 204),
+        Color.FromArgb(102, 230, 204),
+        Color.FromArgb(255, 179, 102),
+        Color.FromArgb(153, 204, 255),
+        Color.FromArgb(230, 230, 128),
+        Color.FromArgb(204, 128, 255),
+        Color.FromArgb(128, 204, 179),
     };
 
-    /// <summary>Pre-cached palette brushes (created once).</summary>
     private readonly SolidBrush[] _paletteBrushes;
 
     public GraphView()
@@ -113,9 +125,6 @@ public class GraphView : Control
 
     // ── Graph / hierarchy management ────────────────────────────────────
 
-    /// <summary>
-    /// Load a graph model without coarsening hierarchy.
-    /// </summary>
     public void SetGraph(GraphModel graph)
     {
         _graph = graph;
@@ -127,9 +136,6 @@ public class GraphView : Control
         Invalidate();
     }
 
-    /// <summary>
-    /// Load a graph with its coarsening hierarchy for level navigation.
-    /// </summary>
     public void SetGraphWithHierarchy(GraphModel graph, CoarseningHierarchy hierarchy)
     {
         _graph = graph;
@@ -147,7 +153,6 @@ public class GraphView : Control
 
     // ── Level navigation ────────────────────────────────────────────────
 
-    /// <summary>Navigate to a coarser level (up). Returns true if changed.</summary>
     public bool GoCoarser()
     {
         if (_hierarchy == null || _currentLevel >= _hierarchy.LevelCount - 1)
@@ -156,7 +161,6 @@ public class GraphView : Control
         return true;
     }
 
-    /// <summary>Navigate to a finer level (down). Returns true if changed.</summary>
     public bool GoFiner()
     {
         if (_hierarchy == null || _currentLevel <= 0)
@@ -165,7 +169,6 @@ public class GraphView : Control
         return true;
     }
 
-    /// <summary>Jump to a specific level (0 = finest).</summary>
     public bool SetLevel(int level)
     {
         if (_hierarchy == null || level < 0 || level >= _hierarchy.LevelCount)
@@ -191,19 +194,16 @@ public class GraphView : Control
 
         if (goingUp)
         {
-            // Coarsening: each fine node moves to its coarse parent's position
-            // Mapping: for each node in fromGraph, where does it go in toGraph?
             int fromN = fromGraph.NodeCount;
             _animFromX = new double[fromN];
             _animFromY = new double[fromN];
             _animToX = new double[fromN];
             _animToY = new double[fromN];
-            _animMapping = new int[fromN]; // fine→coarse
+            _animMapping = new int[fromN];
 
             Array.Copy(fromGraph.NodeX, _animFromX, fromN);
             Array.Copy(fromGraph.NodeY, _animFromY, fromN);
 
-            // Build composite mapping from current level to target level
             for (int i = 0; i < fromN; i++)
             {
                 int coarseIdx = _hierarchy.MapUp(i, _currentLevel, targetLevel);
@@ -214,32 +214,13 @@ public class GraphView : Control
         }
         else
         {
-            // Refining: each coarse node expands to its children's positions
-            // We animate from the coarse graph, and at the end switch to fine
-            int fromN = fromGraph.NodeCount;
-            _animFromX = new double[fromN];
-            _animFromY = new double[fromN];
-            _animToX = new double[fromN];
-            _animToY = new double[fromN];
-            _animMapping = null; // not needed for rendering — we lerp in-place
-
-            Array.Copy(fromGraph.NodeX, _animFromX, fromN);
-            Array.Copy(fromGraph.NodeY, _animFromY, fromN);
-
-            // Target: position each current-level node at where its children are in the fine graph
-            // But we can't really expand N→M during animation easily.
-            // Instead: morph current positions toward the centroid of their fine children.
-            // At the end, snap to the fine graph.
-            // Actually, let's do it from the fine side: animate the fine graph nodes
-            // FROM the coarse parent positions TO their actual fine positions.
             int toN = toGraph.NodeCount;
             _animFromX = new double[toN];
             _animFromY = new double[toN];
             _animToX = new double[toN];
             _animToY = new double[toN];
+            _animMapping = null;
 
-            // For each fine node, start at coarse parent's position
-            // The mapping for level targetLevel→targetLevel+1 ... _currentLevel
             for (int i = 0; i < toN; i++)
             {
                 int coarseIdx = _hierarchy.MapUp(i, targetLevel, _currentLevel);
@@ -249,8 +230,6 @@ public class GraphView : Control
                 _animToY[i] = toGraph.NodeY[i];
             }
 
-            // Switch graph immediately to the fine graph (more nodes)
-            // but start rendering at coarse positions
             _graph = toGraph;
         }
 
@@ -269,13 +248,11 @@ public class GraphView : Control
             return;
         }
 
-        // Ease-in-out interpolation (smoothstep)
         double t = (double)_animFrame / AnimFrames;
         t = t * t * (3.0 - 2.0 * t); // smoothstep
 
         if (_animatingUp)
         {
-            // Lerp the current (fine) graph's positions toward coarse targets
             var graph = _hierarchy!.Graphs[_currentLevel];
             int n = graph.NodeCount;
             for (int i = 0; i < n; i++)
@@ -286,7 +263,6 @@ public class GraphView : Control
         }
         else
         {
-            // Lerp the fine graph's positions from coarse parent toward actual
             var graph = _graph!;
             int n = Math.Min(graph.NodeCount, _animFromX!.Length);
             for (int i = 0; i < n; i++)
@@ -303,11 +279,9 @@ public class GraphView : Control
     {
         StopAnimation();
 
-        // Set final positions and switch to target level
         _currentLevel = _animTargetLevel;
         _graph = _hierarchy!.Graphs[_currentLevel];
 
-        // Restore exact target positions
         if (_animToX != null && _animToY != null)
         {
             int n = Math.Min(_graph.NodeCount, _animToX.Length);
@@ -339,9 +313,6 @@ public class GraphView : Control
 
     // ── Auto-fit ────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Calculate zoom and pan so the graph fills ~80% of the control area.
-    /// </summary>
     public void AutoFit()
     {
         if (_graph == null || _graph.NodeCount == 0) return;
@@ -424,13 +395,18 @@ public class GraphView : Control
         var py = _graph.NodeY;
         var degree = _graph.Degree;
 
-        // ── Draw parent highlight (relationship to next coarser level) ──
-        if (ShowParentHighlight && _hierarchy != null && _currentLevel < _hierarchy.LevelCount - 1 && _animTimer == null)
+        // Compute the visible region in screen coords (with generous margin)
+        var viewRect = new RectangleF(-50, -50, Width + 100, Height + 100);
+
+        // ── Draw parent highlight ──────────────────────────────────────
+        if (ShowParentHighlight && _hierarchy != null
+            && _currentLevel < _hierarchy.LevelCount - 1
+            && _animTimer == null)
         {
             DrawParentHighlight(g);
         }
 
-        // ── Draw edges ─────────────────────────────────────────────────
+        // ── Draw edges (with off-screen culling) ──────────────────────
         int edgeAlpha = Math.Clamp((int)(EdgeAlpha * 255), 10, 255);
         using var edgePen = new Pen(Color.FromArgb(edgeAlpha, 120, 130, 150), 1f);
 
@@ -440,10 +416,17 @@ public class GraphView : Control
         {
             var a = WorldToScreen(px[es[ei]], py[es[ei]]);
             var b = WorldToScreen(px[et[ei]], py[et[ei]]);
+            // Skip edges where both endpoints are off-screen
+            if (!viewRect.Contains(a) && !viewRect.Contains(b))
+            {
+                // But still draw if the line crosses the viewport
+                if (!LineIntersectsRect(a, b, viewRect))
+                    continue;
+            }
             g.DrawLine(edgePen, a, b);
         }
 
-        // ── Draw selected node glow ────────────────────────────────────
+        // ── Draw selected node glow (only on-screen nodes) ────────────
         if (_selection.Count > 0)
         {
             using var glowBrush = new SolidBrush(Color.FromArgb(60, 255, 255, 100));
@@ -452,21 +435,24 @@ public class GraphView : Control
             {
                 if (i >= n) continue;
                 var pt = WorldToScreen(px[i], py[i]);
+                if (!viewRect.Contains(pt)) continue;
                 g.FillEllipse(glowBrush, pt.X - glowR, pt.Y - glowR, glowR * 2, glowR * 2);
             }
         }
 
-        // ── Draw nodes ─────────────────────────────────────────────────
+        // ── Draw nodes (with off-screen culling) ──────────────────────
         float r = NodeRadius;
         using var outlinePen = new Pen(Color.FromArgb(200, 255, 255, 255), 1f);
         using var selOutlinePen = new Pen(Color.FromArgb(255, 255, 255, 100), 2f);
-
         var community = _graph.Community;
+
+        int offScreenCount = 0;
         for (int i = 0; i < n; i++)
         {
             var pt = WorldToScreen(px[i], py[i]);
-            float nr = r + Math.Min(degree[i] * 0.3f, 6f);
+            if (!viewRect.Contains(pt)) { offScreenCount++; continue; }
 
+            float nr = r + Math.Min(degree[i] * 0.3f, 6f);
             g.FillEllipse(_paletteBrushes[community[i] % Palette.Length],
                 pt.X - nr, pt.Y - nr, nr * 2, nr * 2);
 
@@ -475,6 +461,10 @@ public class GraphView : Control
             else
                 g.DrawEllipse(outlinePen, pt.X - nr, pt.Y - nr, nr * 2, nr * 2);
         }
+
+        // ── Draw off-screen indicators at viewport edges ──────────────
+        if (offScreenCount > 0)
+            DrawOffScreenIndicators(g, viewRect);
 
         // ── Draw labels ────────────────────────────────────────────────
         if (ShowLabels && _zoom > 0.5f)
@@ -486,6 +476,8 @@ public class GraphView : Control
             for (int i = 0; i < n; i++)
             {
                 var pt = WorldToScreen(px[i], py[i]);
+                if (!viewRect.Contains(pt)) continue;
+
                 float nr = r + Math.Min(degree[i] * 0.3f, 6f);
                 g.DrawString(labels[i], font, labelBrush, pt.X + nr + 2, pt.Y - 6);
             }
@@ -502,15 +494,224 @@ public class GraphView : Control
             g.DrawRectangle(selPen, rect);
         }
 
+        // ── Draw minimap (bottom-right) ────────────────────────────────
+        if (ShowMinimap)
+            DrawMinimap(g);
+
+        // ── Draw coarsening levels panel (top-left) ────────────────────
+        if (ShowLevelsPanel && _hierarchy != null && _hierarchy.LevelCount > 1)
+            DrawLevelsPanel(g);
+
         // ── HUD ────────────────────────────────────────────────────────
         DrawHud(g);
     }
 
+    // ── Off-screen indicators ───────────────────────────────────────────
+
     /// <summary>
-    /// Draw faint convex hulls or halos around groups of nodes that share
-    /// the same parent at the next coarser level. Shows the coarsening
-    /// structure as a ghost overlay.
+    /// Draw small arrows/dots along the viewport edges to indicate
+    /// where off-screen nodes lie. Groups them into edge bins.
     /// </summary>
+    private void DrawOffScreenIndicators(Graphics g, RectangleF viewRect)
+    {
+        if (_graph == null) return;
+
+        int n = _graph.NodeCount;
+        var px = _graph.NodeX;
+        var py = _graph.NodeY;
+
+        // Bin off-screen nodes into edge regions (8 bins: top, topright, right, etc.)
+        // Simpler: just draw a tiny indicator dot at the clamped edge position
+        using var indicatorBrush = new SolidBrush(Color.FromArgb(120, 255, 200, 80));
+        float dotR = 3f;
+
+        for (int i = 0; i < n; i++)
+        {
+            var pt = WorldToScreen(px[i], py[i]);
+            if (viewRect.Contains(pt)) continue;
+
+            // Clamp to viewport edge
+            float cx = Math.Clamp(pt.X, 2, Width - 2);
+            float cy = Math.Clamp(pt.Y, 2, Height - 2);
+            g.FillEllipse(indicatorBrush, cx - dotR, cy - dotR, dotR * 2, dotR * 2);
+        }
+    }
+
+    // ── Minimap ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Draw a small overview of the entire graph in the bottom-right
+    /// corner, with a rectangle showing the current viewport.
+    /// </summary>
+    private void DrawMinimap(Graphics g)
+    {
+        if (_graph == null || _graph.NodeCount == 0) return;
+
+        int n = _graph.NodeCount;
+        var px = _graph.NodeX;
+        var py = _graph.NodeY;
+
+        // Compute world bounds
+        double wMinX = double.MaxValue, wMinY = double.MaxValue;
+        double wMaxX = double.MinValue, wMaxY = double.MinValue;
+        for (int i = 0; i < n; i++)
+        {
+            if (px[i] < wMinX) wMinX = px[i];
+            if (py[i] < wMinY) wMinY = py[i];
+            if (px[i] > wMaxX) wMaxX = px[i];
+            if (py[i] > wMaxY) wMaxY = py[i];
+        }
+
+        double wW = wMaxX - wMinX;
+        double wH = wMaxY - wMinY;
+        if (wW < 1) wW = 1;
+        if (wH < 1) wH = 1;
+
+        // Minimap position (bottom-right)
+        int mmX = Width - MinimapSize - MinimapMargin;
+        int mmY = Height - MinimapSize - MinimapMargin - 24; // above HUD
+        int mmW = MinimapSize;
+        int mmH = MinimapSize;
+
+        // Fit graph into minimap preserving aspect ratio
+        double scale = Math.Min((double)(mmW - 8) / wW, (double)(mmH - 8) / wH);
+        double offX = mmX + 4 + ((mmW - 8) - wW * scale) / 2;
+        double offY = mmY + 4 + ((mmH - 8) - wH * scale) / 2;
+
+        // Background
+        using var bgBrush = new SolidBrush(Color.FromArgb(180, 16, 16, 24));
+        using var borderPen = new Pen(Color.FromArgb(100, 100, 110, 140), 1f);
+        g.FillRectangle(bgBrush, mmX, mmY, mmW, mmH);
+        g.DrawRectangle(borderPen, mmX, mmY, mmW, mmH);
+
+        // Draw nodes as tiny dots
+        using var nodeBrush = new SolidBrush(Color.FromArgb(160, 140, 160, 200));
+        for (int i = 0; i < n; i++)
+        {
+            float mx = (float)((px[i] - wMinX) * scale + offX);
+            float my = (float)((py[i] - wMinY) * scale + offY);
+            g.FillRectangle(nodeBrush, mx, my, 1.5f, 1.5f);
+        }
+
+        // Draw viewport rectangle
+        // The current viewport in world coords:
+        var (vwTL_x, vwTL_y) = ScreenToWorld(0, 0);
+        var (vwBR_x, vwBR_y) = ScreenToWorld(Width, Height);
+
+        float vx1 = (float)((vwTL_x - wMinX) * scale + offX);
+        float vy1 = (float)((vwTL_y - wMinY) * scale + offY);
+        float vx2 = (float)((vwBR_x - wMinX) * scale + offX);
+        float vy2 = (float)((vwBR_y - wMinY) * scale + offY);
+
+        // Clamp to minimap bounds
+        vx1 = Math.Max(vx1, mmX);
+        vy1 = Math.Max(vy1, mmY);
+        vx2 = Math.Min(vx2, mmX + mmW);
+        vy2 = Math.Min(vy2, mmY + mmH);
+
+        if (vx2 > vx1 && vy2 > vy1)
+        {
+            using var vpPen = new Pen(Color.FromArgb(180, 255, 255, 255), 1f);
+            using var vpFill = new SolidBrush(Color.FromArgb(20, 255, 255, 255));
+            g.FillRectangle(vpFill, vx1, vy1, vx2 - vx1, vy2 - vy1);
+            g.DrawRectangle(vpPen, vx1, vy1, vx2 - vx1, vy2 - vy1);
+        }
+
+        // Label
+        using var mmFont = new Font("Cascadia Mono", 7f);
+        using var mmLabelBrush = new SolidBrush(Color.FromArgb(120, 160, 160, 180));
+        g.DrawString("minimap", mmFont, mmLabelBrush, mmX + 3, mmY + 1);
+    }
+
+    // ── Coarsening levels panel ─────────────────────────────────────────
+
+    /// <summary>
+    /// Draw a clickable panel showing all coarsening levels with
+    /// node count, edge count, and estimated memory usage.
+    /// </summary>
+    private void DrawLevelsPanel(Graphics g)
+    {
+        if (_hierarchy == null) return;
+
+        int levelCount = _hierarchy.LevelCount;
+        int panelH = LevelsPanelPadTop + levelCount * LevelRowHeight + 8;
+        int panelW = LevelsPanelWidth;
+        int px = LevelsPanelPadLeft;
+        int py = 28; // below menu strip area
+
+        // Background
+        using var bgBrush = new SolidBrush(Color.FromArgb(200, 16, 16, 24));
+        using var borderPen = new Pen(Color.FromArgb(80, 100, 110, 140), 1f);
+        g.FillRectangle(bgBrush, px, py, panelW, panelH);
+        g.DrawRectangle(borderPen, px, py, panelW, panelH);
+
+        // Header
+        using var headerFont = new Font("Cascadia Mono", 8.5f, FontStyle.Bold);
+        using var headerBrush = new SolidBrush(Color.FromArgb(200, 200, 210, 230));
+        g.DrawString("Coarsening Levels", headerFont, headerBrush, px + 6, py + 4);
+
+        // Column headers
+        using var colFont = new Font("Cascadia Mono", 7f);
+        using var colBrush = new SolidBrush(Color.FromArgb(120, 160, 160, 180));
+        int headerY = py + 16;
+        g.DrawString("Lvl   Nodes   Edges    Memory", colFont, colBrush, px + 6, headerY);
+
+        // Rows
+        using var rowFont = new Font("Cascadia Mono", 8f);
+        using var normalBrush = new SolidBrush(Color.FromArgb(180, 180, 190, 210));
+        using var currentBrush = new SolidBrush(Color.FromArgb(255, 102, 194, 255));
+        using var hoverBg = new SolidBrush(Color.FromArgb(40, 100, 200, 255));
+        using var currentBg = new SolidBrush(Color.FromArgb(30, 102, 194, 255));
+
+        for (int i = 0; i < levelCount; i++)
+        {
+            int rowY = py + LevelsPanelPadTop + i * LevelRowHeight;
+            bool isCurrent = (i == _currentLevel);
+            bool isHovered = (i == _hoveredLevelRow);
+
+            // Row background
+            if (isCurrent)
+                g.FillRectangle(currentBg, px + 1, rowY, panelW - 2, LevelRowHeight);
+            else if (isHovered)
+                g.FillRectangle(hoverBg, px + 1, rowY, panelW - 2, LevelRowHeight);
+
+            var graph = _hierarchy.Graphs[i];
+            long memBytes = graph.EstimateMemoryBytes();
+            string memStr = FormatBytes(memBytes);
+
+            string line = $" {i,2}  {graph.NodeCount,6}  {graph.EdgeCount,6}  {memStr,8}";
+            g.DrawString(line, rowFont, isCurrent ? currentBrush : normalBrush,
+                px + 4, rowY + 2);
+
+            // Current level indicator
+            if (isCurrent)
+                g.DrawString("▶", rowFont, currentBrush, px + panelW - 20, rowY + 2);
+        }
+    }
+
+    /// <summary>Get the levels panel bounding rect for hit-testing.</summary>
+    private Rectangle GetLevelsPanelRect()
+    {
+        if (_hierarchy == null) return Rectangle.Empty;
+        int levelCount = _hierarchy.LevelCount;
+        int panelH = LevelsPanelPadTop + levelCount * LevelRowHeight + 8;
+        return new Rectangle(LevelsPanelPadLeft, 28, LevelsPanelWidth, panelH);
+    }
+
+    /// <summary>Hit-test which level row a mouse point is over. Returns -1 if none.</summary>
+    private int HitTestLevelRow(Point pt)
+    {
+        if (_hierarchy == null || !ShowLevelsPanel) return -1;
+        var panelRect = GetLevelsPanelRect();
+        if (!panelRect.Contains(pt)) return -1;
+
+        int rowIdx = (pt.Y - panelRect.Y - LevelsPanelPadTop) / LevelRowHeight;
+        if (rowIdx < 0 || rowIdx >= _hierarchy.LevelCount) return -1;
+        return rowIdx;
+    }
+
+    // ── Parent highlight ────────────────────────────────────────────────
+
     private void DrawParentHighlight(Graphics g)
     {
         if (_hierarchy == null || _graph == null) return;
@@ -520,12 +721,8 @@ public class GraphView : Control
         var coarseGraph = _hierarchy.Graphs[nextLevel];
         var map = _hierarchy.FineToCoarse[_currentLevel];
         int n = _graph.NodeCount;
-
-        // For each coarse node, collect screen positions of its children
-        // and draw a translucent ellipse encompassing them
         int coarseN = coarseGraph.NodeCount;
 
-        // Compute bounding box for each coarse node's children
         var minXs = new float[coarseN];
         var minYs = new float[coarseN];
         var maxXs = new float[coarseN];
@@ -547,7 +744,6 @@ public class GraphView : Control
             counts[ci]++;
         }
 
-        // Draw translucent ellipses for groups with >1 member
         for (int ci = 0; ci < coarseN; ci++)
         {
             if (counts[ci] <= 1) continue;
@@ -583,12 +779,10 @@ public class GraphView : Control
     {
         if (_graph == null) return;
 
-        // Graph info line
         string info = $"{_graph.Title}  —  {_graph.NodeCount}n, {_graph.EdgeCount}e";
         if (_selection.Count > 0)
             info += $"  |  {_selection.Count} selected";
 
-        // Level indicator
         if (_hierarchy != null && _hierarchy.LevelCount > 1)
         {
             info += $"  |  Level {_currentLevel}/{_hierarchy.LevelCount - 1}";
@@ -600,18 +794,65 @@ public class GraphView : Control
         using var brush = new SolidBrush(Color.FromArgb(160, 200, 200, 220));
         g.DrawString(info, font, brush, 8, Height - 24);
 
-        // Level navigation hint (top-right)
         if (_hierarchy != null && _hierarchy.LevelCount > 1)
         {
-            string hint = "PgUp/PgDn: navigate levels";
+            string hint = "PgUp/PgDn: navigate levels  |  Click level panel to jump";
             var hintSize = g.MeasureString(hint, font);
             g.DrawString(hint, font, brush, Width - hintSize.Width - 8, 8);
         }
     }
 
+    // ── Helpers ──────────────────────────────────────────────────────────
+
+    /// <summary>Fast line-rect intersection test.</summary>
+    private static bool LineIntersectsRect(PointF a, PointF b, RectangleF rect)
+    {
+        // Cohen-Sutherland outcode approach (simplified)
+        float xmin = rect.Left, xmax = rect.Right;
+        float ymin = rect.Top, ymax = rect.Bottom;
+
+        float dx = b.X - a.X;
+        float dy = b.Y - a.Y;
+
+        // Check horizontal and vertical slab intersections
+        float tmin = 0, tmax = 1;
+
+        if (Math.Abs(dx) > 0.001f)
+        {
+            float t1 = (xmin - a.X) / dx;
+            float t2 = (xmax - a.X) / dx;
+            if (t1 > t2) (t1, t2) = (t2, t1);
+            tmin = Math.Max(tmin, t1);
+            tmax = Math.Min(tmax, t2);
+            if (tmin > tmax) return false;
+        }
+        else if (a.X < xmin || a.X > xmax) return false;
+
+        if (Math.Abs(dy) > 0.001f)
+        {
+            float t1 = (ymin - a.Y) / dy;
+            float t2 = (ymax - a.Y) / dy;
+            if (t1 > t2) (t1, t2) = (t2, t1);
+            tmin = Math.Max(tmin, t1);
+            tmax = Math.Min(tmax, t2);
+            if (tmin > tmax) return false;
+        }
+        else if (a.Y < ymin || a.Y > ymax) return false;
+
+        return true;
+    }
+
+    /// <summary>Format a byte count as human-readable (KB, MB, etc.).</summary>
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+        if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
+        return $"{bytes / (1024.0 * 1024 * 1024):F2} GB";
+    }
+
     // ── Coordinate transforms ───────────────────────────────────────────
 
-    /// <summary>Convert world coordinates to screen coordinates.</summary>
     public PointF WorldToScreen(double wx, double wy)
     {
         return new PointF(
@@ -619,13 +860,11 @@ public class GraphView : Control
             (float)(wy * _zoom + _pan.Y));
     }
 
-    /// <summary>Convert screen coordinates to world coordinates.</summary>
     public (double wx, double wy) ScreenToWorld(float sx, float sy)
     {
         return ((sx - _pan.X) / _zoom, (sy - _pan.Y) / _zoom);
     }
 
-    /// <summary>Convert world coordinates for node i to screen.</summary>
     public PointF WorldToScreenNode(int i)
     {
         if (_graph == null) return PointF.Empty;
@@ -636,18 +875,28 @@ public class GraphView : Control
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
-        Focus(); // ensure we get key events
+        Focus();
+
+        // Check if clicking on the levels panel
+        if (e.Button == MouseButtons.Left && ShowLevelsPanel
+            && _hierarchy != null && _hierarchy.LevelCount > 1)
+        {
+            int hitLevel = HitTestLevelRow(e.Location);
+            if (hitLevel >= 0 && hitLevel != _currentLevel)
+            {
+                SetLevel(hitLevel);
+                return; // consume the click
+            }
+        }
 
         if (e.Button == MouseButtons.Left)
         {
-            // Left click: start selection rectangle
             _selecting = true;
             _selStart = e.Location;
             _selEnd = e.Location;
         }
         else if (e.Button == MouseButtons.Middle || e.Button == MouseButtons.Right)
         {
-            // Middle/right click: pan
             _panning = true;
             _lastMouse = e.Location;
             Cursor = Cursors.SizeAll;
@@ -669,6 +918,17 @@ public class GraphView : Control
             _selEnd = e.Location;
             Invalidate();
         }
+        else
+        {
+            // Hover tracking for levels panel
+            int oldHover = _hoveredLevelRow;
+            _hoveredLevelRow = HitTestLevelRow(e.Location);
+            if (_hoveredLevelRow != oldHover)
+            {
+                Cursor = _hoveredLevelRow >= 0 ? Cursors.Hand : Cursors.Default;
+                Invalidate();
+            }
+        }
         base.OnMouseMove(e);
     }
 
@@ -688,13 +948,23 @@ public class GraphView : Control
         base.OnMouseUp(e);
     }
 
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        if (_hoveredLevelRow >= 0)
+        {
+            _hoveredLevelRow = -1;
+            Cursor = Cursors.Default;
+            Invalidate();
+        }
+        base.OnMouseLeave(e);
+    }
+
     private void FinishSelection(MouseEventArgs e)
     {
         if (_graph == null) return;
 
         var rect = GetSelectionRect();
 
-        // If it's a tiny rect (click, not drag), do single-node toggle
         if (rect.Width < 4 && rect.Height < 4)
         {
             int hit = HitTestNode(e.Location);
@@ -710,7 +980,6 @@ public class GraphView : Control
         }
         else
         {
-            // Rectangle selection
             bool ctrl = ModifierKeys.HasFlag(Keys.Control);
             if (!ctrl) _selection.Clear();
 
@@ -766,7 +1035,6 @@ public class GraphView : Control
     {
         float factor = e.Delta > 0 ? 1.15f : 1 / 1.15f;
 
-        // Zoom toward mouse position
         _pan.X = e.X - (e.X - _pan.X) * factor;
         _pan.Y = e.Y - (e.Y - _pan.Y) * factor;
         _zoom *= factor;
@@ -775,7 +1043,7 @@ public class GraphView : Control
         base.OnMouseWheel(e);
     }
 
-    // ── Keyboard: level navigation ──────────────────────────────────────
+    // ── Keyboard ────────────────────────────────────────────────────────
 
     protected override void OnKeyDown(KeyEventArgs e)
     {
@@ -812,7 +1080,6 @@ public class GraphView : Control
 
     protected override bool IsInputKey(Keys keyData)
     {
-        // Ensure we get these keys rather than the form processing them
         return keyData switch
         {
             Keys.PageUp or Keys.PageDown or Keys.Home or Keys.End => true,

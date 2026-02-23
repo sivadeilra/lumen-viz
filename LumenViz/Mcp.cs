@@ -717,14 +717,18 @@ public class McpServer
             if (hierarchy == null) return "No coarsening hierarchy available";
 
             var levels = new JsonArray();
+            long totalMemory = 0;
             for (int i = 0; i < hierarchy.LevelCount; i++)
             {
                 var g = hierarchy.Graphs[i];
+                long mem = g.EstimateMemoryBytes();
+                totalMemory += mem;
                 levels.Add(new JsonObject
                 {
                     ["level"] = i,
                     ["nodes"] = g.NodeCount,
                     ["edges"] = g.EdgeCount,
+                    ["memory_bytes"] = mem,
                     ["is_current"] = (i == win.GraphView.CurrentLevel),
                 });
             }
@@ -733,6 +737,7 @@ public class McpServer
                 ["window"] = win.WindowId,
                 ["current_level"] = win.GraphView.CurrentLevel,
                 ["level_count"] = hierarchy.LevelCount,
+                ["total_memory_bytes"] = totalMemory,
                 ["levels"] = levels,
             }.ToJsonString();
         });

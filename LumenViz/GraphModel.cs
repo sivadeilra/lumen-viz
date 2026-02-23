@@ -125,6 +125,25 @@ public sealed class GraphModel
     }
 
     /// <summary>
+    /// Estimate the number of bytes used by the node, edge, and
+    /// adjacency arrays for this graph. Does not include object
+    /// headers, labels, or alignment padding — just the raw array data.
+    /// </summary>
+    public long EstimateMemoryBytes()
+    {
+        long bytes = 0;
+        // Node arrays: NodeX[N] + NodeY[N] (double) + Community[N] + Degree[N] (int)
+        bytes += (long)NodeCount * (8 + 8 + 4 + 4);
+        // Edge arrays: EdgeSource[M] + EdgeTarget[M] (int) + EdgeWeight[M] (double)
+        bytes += (long)EdgeCount * (4 + 4 + 8);
+        // CSR: AdjOffset[N+1] (int) + AdjList[2M] (int) + AdjWeight[2M] (double)
+        bytes += (long)(NodeCount + 1) * 4;
+        bytes += (long)AdjList.Length * 4;
+        bytes += (long)AdjWeight.Length * 8;
+        return bytes;
+    }
+
+    /// <summary>
     /// Assign communities using label propagation. Uses array-based
     /// counting to avoid Dictionary allocations per node per iteration.
     /// </summary>
