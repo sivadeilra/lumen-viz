@@ -182,12 +182,20 @@ public class GraphView : Control
 
     // ── Graph / hierarchy management ────────────────────────────────────
 
+    /// <summary>
+    /// Node count above which parent-highlight ellipses are auto-disabled.
+    /// Drawing one ellipse per coarse group is O(coarseN) with allocations;
+    /// at scale it hammers the render loop for little visual benefit.
+    /// </summary>
+    private const int ParentHighlightAutoDisableThreshold = 2000;
+
     public void SetGraph(GraphModel graph)
     {
         _graph = graph;
         _hierarchy = null;
         _currentLevel = 0;
         _selection.Clear();
+        ShowParentHighlight = graph.NodeCount <= ParentHighlightAutoDisableThreshold;
         StopAnimation();
         AutoFit();
         Invalidate();
@@ -199,6 +207,7 @@ public class GraphView : Control
         _hierarchy = hierarchy;
         _currentLevel = 0;
         _selection.Clear();
+        ShowParentHighlight = graph.NodeCount <= ParentHighlightAutoDisableThreshold;
         StopAnimation();
         AutoFit();
         Invalidate();
