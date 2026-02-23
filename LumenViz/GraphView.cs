@@ -61,6 +61,14 @@ public class GraphView : Control
     private bool _animatingUp;
     private int _animTargetLevel;
 
+    // ── Viewport animation (smooth pan/zoom after level transition) ─────
+    private System.Windows.Forms.Timer? _vpAnimTimer;
+    private float _vpFromPanX, _vpFromPanY, _vpFromZoom;
+    private float _vpToPanX, _vpToPanY, _vpToZoom;
+    private int _vpAnimFrame;
+    private const int VpAnimFrames = 30;  // ~500ms at 16ms interval
+    private const int VpAnimIntervalMs = 16;
+
     // ── Minimap ─────────────────────────────────────────────────────────
     private const int MinimapSize = 160;
     private const int MinimapMargin = 8;
@@ -184,6 +192,7 @@ public class GraphView : Control
     {
         if (_hierarchy == null) return;
         StopAnimation();
+        StopVpAnimation();
 
         var fromGraph = _hierarchy.Graphs[_currentLevel];
         var toGraph = _hierarchy.Graphs[targetLevel];
@@ -293,9 +302,64 @@ public class GraphView : Control
         }
 
         _selection.Clear();
-        AutoFit();
+
+        // Instead of snapping to new bounds, smoothly animate the viewport.
+        // Save current pan/zoom, compute target, then animate between them.
+        _vpFromPanX = _pan.X;
+        _vpFromPanY = _pan.Y;
+        _vpFromZoom = _zoom;
+
+        AutoFit(); // computes new _pan and _zoom
+
+        _vpToPanX = _pan.X;
+        _vpToPanY = _pan.Y;
+        _vpToZoom = _zoom;
+
+        // Restore old viewport — the timer will interpolate to the new one
+        _pan = new PointF(_vpFromPanX, _vpFromPanY);
+        _zoom = _vpFromZoom;
+
+        _vpAnimFrame = 0;
+        _vpAnimTimer = new System.Windows.Forms.Timer { Interval = VpAnimIntervalMs };
+        _vpAnimTimer.Tick += OnVpAnimTick;
+        _vpAnimTimer.Start();
+
         Invalidate();
         LevelChanged?.Invoke();
+    }
+
+    private void OnVpAnimTick(object? sender, EventArgs e)
+    {
+        _vpAnimFrame++;
+        if (_vpAnimFrame >= VpAnimFrames)
+        {
+            StopVpAnimation();
+            _pan = new PointF(_vpToPanX, _vpToPanY);
+            _zoom = _vpToZoom;
+            Invalidate();
+            return;
+        }
+
+        double t = (double)_vpAnimFrame / VpAnimFrames;
+        t = t * t * (3.0 - 2.0 * t); // smoothstep
+
+        _pan = new PointF(
+            (float)(_vpFromPanX + (_vpToPanX - _vpFromPanX) * t),
+            (float)(_vpFromPanY + (_vpToPanY - _vpFromPanY) * t));
+        _zoom = (float)(_vpFromZoom + (_vpToZoom - _vpFromZoom) * t);
+
+        Invalidate();
+    }
+
+    private void StopVpAnimation()
+    {
+        if (_vpAnimTimer != null)
+        {
+            _vpAnimTimer.Stop();
+            _vpAnimTimer.Tick -= OnVpAnimTick;
+            _vpAnimTimer.Dispose();
+            _vpAnimTimer = null;
+        }
     }
 
     private void StopAnimation()
@@ -1092,6 +1156,7 @@ public class GraphView : Control
         if (disposing)
         {
             StopAnimation();
+            StopVpAnimation();
             foreach (var b in _paletteBrushes) b.Dispose();
         }
         base.Dispose(disposing);

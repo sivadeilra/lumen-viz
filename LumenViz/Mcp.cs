@@ -267,7 +267,7 @@ public class McpServer
                     ("iterations", "string", "Layout iterations (default 300)", false),
                     ("gravity", "string", "Gravity constant (default 0.05)", false),
                     ("layout", "string", "Layout mode: 'auto' (default), 'flat', or 'multilevel'", false),
-                    ("bounded", "string", "'true' (default) for rectangle-bounded layout, 'false' for unbounded free space", false),
+                    ("bounded", "string", "'true' for rectangle-bounded layout, 'false' (default) for unbounded free space", false),
                     ("aspect_ratio", "string", "Aspect ratio W:H for bounded mode, e.g. '4:3' or '16:9' (default '1:1')", false))),
 
             ToolDef("get_graph_info",
@@ -280,7 +280,7 @@ public class McpServer
                     ("window", "string", "Window ID", true),
                     ("iterations", "string", "Number of iterations (default 300)", false),
                     ("layout", "string", "Layout mode: 'auto' (default), 'flat', or 'multilevel'", false),
-                    ("bounded", "string", "'true' (default) for rectangle-bounded, 'false' for unbounded", false),
+                    ("bounded", "string", "'true' for rectangle-bounded, 'false' (default) for unbounded", false),
                     ("aspect_ratio", "string", "Aspect ratio W:H for bounded mode, e.g. '4:3' (default '1:1')", false))),
 
             ToolDef("auto_fit",
@@ -402,17 +402,17 @@ public class McpServer
                 "show_message" => ShowMessage(args),
 
                 // ── Graph visualization ────────────────────────────────
-                "load_graph" => LoadGraph(args, 300, 0.05, "auto"),
+                "load_graph" => LoadGraph(args, 300, 0.05, "auto", false, "1:1"),
                 "load_graph_with_layout" => LoadGraph(args,
                     IntArg(args, "iterations", 300),
                     DoubleArg(args, "gravity", 0.05),
                     ArgOr(args, "layout", "auto"),
-                    BoolArg(args, "bounded", true),
+                    BoolArg(args, "bounded", false),
                     ArgOr(args, "aspect_ratio", "1:1")),
                 "get_graph_info" => GetGraphInfo(args),
                 "rerun_layout" => RerunLayout(args, IntArg(args, "iterations", 300),
                     ArgOr(args, "layout", "auto"),
-                    BoolArg(args, "bounded", true),
+                    BoolArg(args, "bounded", false),
                     ArgOr(args, "aspect_ratio", "1:1")),
                 "auto_fit" => AutoFitWindow(args),
 
@@ -784,7 +784,7 @@ public class McpServer
     // -----------------------------------------------------------------------
 
     private string LoadGraph(JsonNode? args, int iterations, double gravity, string layoutMode,
-        bool bounded = true, string aspectRatio = "1:1")
+        bool bounded = false, string aspectRatio = "1:1")
     {
         var win = GetWindow(args);
         var path = Arg(args, "path");
@@ -844,7 +844,7 @@ public class McpServer
     }
 
     private string RerunLayout(JsonNode? args, int iterations, string layoutMode,
-        bool bounded = true, string aspectRatio = "1:1")
+        bool bounded = false, string aspectRatio = "1:1")
     {
         var win = GetWindow(args);
         return InvokeOnUI(() =>
@@ -873,7 +873,7 @@ public class McpServer
     /// Returns the coarsening hierarchy if multi-level was used, null otherwise.
     /// </summary>
     private static CoarseningHierarchy? RunLayout(GraphModel graph, int iterations, double gravity, string mode,
-        bool bounded = true, string aspectRatio = "1:1")
+        bool bounded = false, string aspectRatio = "1:1")
     {
         var (w, h) = bounded ? ParseAspectRatio(aspectRatio) : (1000.0, 1000.0);
 

@@ -26,11 +26,12 @@ public class ForceLayout
     public double Gravity { get; set; } = 0.05;
 
     /// <summary>
-    /// When true (default), nodes are confined inside Width×Height with soft
-    /// boundary pull-back. When false, layout runs in unbounded free space —
-    /// k is derived purely from node count and no boundary forces are applied.
+    /// When true, nodes are confined inside Width×Height with soft
+    /// boundary pull-back. When false (default), layout runs in unbounded
+    /// free space — k is derived purely from node count and no boundary
+    /// forces are applied.
     /// </summary>
-    public bool Bounded { get; set; } = true;
+    public bool Bounded { get; set; } = false;
 
     public ForceLayout(GraphModel graph)
     {

@@ -23,8 +23,8 @@ public sealed class MultiLevelLayout
     public double Height { get; set; } = 1000;
     public double Gravity { get; set; } = 0.05;
 
-    /// <summary>When false, layout runs in unbounded free space.</summary>
-    public bool Bounded { get; set; } = true;
+    /// <summary>When false (default), layout runs in unbounded free space.</summary>
+    public bool Bounded { get; set; } = false;
 
     /// <summary>FR iterations for the coarsest level (default 500).</summary>
     public int CoarseIterations { get; set; } = 500;
