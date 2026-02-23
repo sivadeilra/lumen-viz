@@ -47,12 +47,32 @@ partial class MainForm
 
         _menuStrip.Items.AddRange(new ToolStripItem[] { _fileMenu, _editMenu, _windowMenu });
 
+        // --- Hello-world controls ---
+
+        _helloLabel = new Label
+        {
+            Text = "Hello from Lumen Viz!",
+            Font = new Font("Segoe UI", 18f, FontStyle.Bold),
+            AutoSize = true,
+            Location = new Point(20, 50),
+        };
+
+        _inputTextBox = new TextBox
+        {
+            Text = "",
+            Font = new Font("Segoe UI", 12f),
+            Location = new Point(20, 110),
+            Size = new Size(500, 30),
+        };
+
         // Form
         this.AutoScaleMode = AutoScaleMode.Font;
         this.ClientSize = new Size(1280, 800);
         this.Text = "Lumen Viz";
         this.MainMenuStrip = _menuStrip;
         this.Controls.Add(_menuStrip);
+        this.Controls.Add(_helloLabel);
+        this.Controls.Add(_inputTextBox);
     }
 
     #endregion
@@ -62,4 +82,6 @@ partial class MainForm
     private ToolStripMenuItem _fileExitItem = null!;
     private ToolStripMenuItem _editMenu = null!;
     private ToolStripMenuItem _windowMenu = null!;
+    private Label _helloLabel = null!;
+    private TextBox _inputTextBox = null!;
 }

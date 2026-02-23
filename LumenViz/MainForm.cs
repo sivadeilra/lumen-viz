@@ -7,6 +7,10 @@ public partial class MainForm : Form
         InitializeComponent();
     }
 
+    // Public accessors for MCP tools
+    public Label HelloLabel => _helloLabel;
+    public TextBox InputTextBox => _inputTextBox;
+
     private void ExitMenuItem_Click(object? sender, EventArgs e)
     {
         Close();
