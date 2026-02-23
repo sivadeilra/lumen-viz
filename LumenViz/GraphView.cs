@@ -120,6 +120,43 @@ public class GraphView : Control
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public string LodMode { get; set; } = "auto";
 
+    // ── Color mode ──────────────────────────────────────────────────────
+    private readonly NodeColorProvider _colorProvider = new();
+    private string _nodeColorMode = "community";
+    private string _edgeColorMode = "uniform";
+    private Rgba32[] _nodeColors = Array.Empty<Rgba32>();
+    private Rgba32[] _edgeColors = Array.Empty<Rgba32>();
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public string NodeColorMode
+    {
+        get => _nodeColorMode;
+        set
+        {
+            _nodeColorMode = value;
+            RefreshColors();
+            Invalidate();
+        }
+    }
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public string EdgeColorMode
+    {
+        get => _edgeColorMode;
+        set
+        {
+            _edgeColorMode = value;
+            RefreshColors();
+            Invalidate();
+        }
+    }
+
+    private void RefreshColors()
+    {
+        _nodeColors = _colorProvider.GetNodeColors(_nodeColorMode);
+        _edgeColors = _colorProvider.GetEdgeColors(_edgeColorMode);
+    }
+
     // ── Performance instrumentation ─────────────────────────────────────
     private readonly Stopwatch _frameSw = new();
     private readonly Stopwatch _phaseSw = new();
@@ -196,6 +233,8 @@ public class GraphView : Control
         _currentLevel = 0;
         _selection.Clear();
         ShowParentHighlight = graph.NodeCount <= ParentHighlightAutoDisableThreshold;
+        _colorProvider.SetGraph(graph);
+        RefreshColors();
         StopAnimation();
         AutoFit();
         Invalidate();
@@ -208,6 +247,8 @@ public class GraphView : Control
         _currentLevel = 0;
         _selection.Clear();
         ShowParentHighlight = graph.NodeCount <= ParentHighlightAutoDisableThreshold;
+        _colorProvider.SetGraph(graph);
+        RefreshColors();
         StopAnimation();
         AutoFit();
         Invalidate();
@@ -348,6 +389,8 @@ public class GraphView : Control
 
         _currentLevel = _animTargetLevel;
         _graph = _hierarchy!.Graphs[_currentLevel];
+        _colorProvider.SetGraph(_graph);
+        RefreshColors();
 
         if (_animToX != null && _animToY != null)
         {
@@ -550,50 +593,41 @@ public class GraphView : Control
         }
         double parentHighlightMs = _phaseSw.Elapsed.TotalMilliseconds;
 
-        // ── Draw edges (batched) ──────────────────────────────────────
+        // ── Draw edges ──────────────────────────────────────────────────
         _phaseSw.Restart();
         if (ShowEdges)
         {
             int edgeAlpha = Math.Clamp((int)(EdgeAlpha * 255), 10, 255);
+            bool useEdgeColors = _edgeColorMode != "uniform" && _edgeColors.Length > 0;
             using var edgePen = new Pen(Color.FromArgb(edgeAlpha, 120, 130, 150), 1f);
 
             var es = _graph.EdgeSource;
             var et = _graph.EdgeTarget;
             int edgeCount = _graph.EdgeCount;
 
-            if (edgeCount > 0)
+            for (int ei = 0; ei < edgeCount; ei++)
             {
-                var lineBuf = new PointF[edgeCount * 2];
-                int lineIdx = 0;
+                float ax = _screenX[es[ei]], ay = _screenY[es[ei]];
+                float bx = _screenX[et[ei]], by = _screenY[et[ei]];
 
-                for (int ei = 0; ei < edgeCount; ei++)
+                bool aIn = ax >= viewL && ax <= viewR && ay >= viewT && ay <= viewB;
+                bool bIn = bx >= viewL && bx <= viewR && by >= viewT && by <= viewB;
+                if (!aIn && !bIn)
                 {
-                    float ax = _screenX[es[ei]], ay = _screenY[es[ei]];
-                    float bx = _screenX[et[ei]], by = _screenY[et[ei]];
-
-                    bool aIn = ax >= viewL && ax <= viewR && ay >= viewT && ay <= viewB;
-                    bool bIn = bx >= viewL && bx <= viewR && by >= viewT && by <= viewB;
-                    if (!aIn && !bIn)
-                    {
-                        if (!LineIntersectsRect(
-                            new PointF(ax, ay), new PointF(bx, by),
-                            new RectangleF(viewL, viewT, viewR - viewL, viewB - viewT)))
-                            continue;
-                    }
-
-                    lineBuf[lineIdx++] = new PointF(ax, ay);
-                    lineBuf[lineIdx++] = new PointF(bx, by);
+                    if (!LineIntersectsRect(
+                        new PointF(ax, ay), new PointF(bx, by),
+                        new RectangleF(viewL, viewT, viewR - viewL, viewB - viewT)))
+                        continue;
                 }
 
-                if (lineIdx >= 4)
+                if (useEdgeColors && ei < _edgeColors.Length)
                 {
-                    for (int li = 0; li < lineIdx; li += 2)
-                        g.DrawLine(edgePen, lineBuf[li], lineBuf[li + 1]);
+                    var ec = _edgeColors[ei];
+                    int a = Math.Clamp((int)(ec.A * EdgeAlpha / 0.3f), 10, 255);
+                    edgePen.Color = Color.FromArgb(a, ec.R, ec.G, ec.B);
                 }
-                else if (lineIdx == 2)
-                {
-                    g.DrawLine(edgePen, lineBuf[0], lineBuf[1]);
-                }
+
+                g.DrawLine(edgePen, ax, ay, bx, by);
             }
         }
         double edgesMs = _phaseSw.Elapsed.TotalMilliseconds;
@@ -632,6 +666,7 @@ public class GraphView : Control
         int offScreenCount = 0;
         if (ShowNodes)
         {
+            using var colorBrush = new SolidBrush(Color.White);
             for (int i = 0; i < n; i++)
             {
                 float sx = _screenX[i], sy = _screenY[i];
@@ -642,15 +677,16 @@ public class GraphView : Control
                 }
 
                 float nr = r + Math.Min(degree[i] * 0.3f, 6f);
-                var brush = _paletteBrushes[community[i] % Palette.Length];
+                var nc = _nodeColors.Length > i ? _nodeColors[i] : new Rgba32(140, 160, 200);
+                colorBrush.Color = Color.FromArgb(nc.A, nc.R, nc.G, nc.B);
 
                 if (lowDetail)
                 {
-                    g.FillRectangle(brush, sx - nr, sy - nr, nr * 2, nr * 2);
+                    g.FillRectangle(colorBrush, sx - nr, sy - nr, nr * 2, nr * 2);
                 }
                 else
                 {
-                    g.FillEllipse(brush, sx - nr, sy - nr, nr * 2, nr * 2);
+                    g.FillEllipse(colorBrush, sx - nr, sy - nr, nr * 2, nr * 2);
                     if (ShowOutlines)
                     {
                         if (_selection.Contains(i))

@@ -394,6 +394,25 @@ public class McpServer
                     ("window", "string", "Window ID", true),
                     ("option", "string", "Option name (e.g. show_edges)", true),
                     ("value", "string", "Option value (true/false or string)", true))),
+
+            ToolDef("set_color_mode",
+                "Set the node and/or edge color mode. " +
+                "Node modes: community (default, categorical by detected community), " +
+                "degree (sequential gradient by node degree — reveals hubs), " +
+                "in_out_ratio (diverging blue/white/red by in/out degree ratio — directed only, " +
+                "falls back to degree for undirected). " +
+                "Edge modes: uniform (default gray), community (intra-community edges colored, " +
+                "inter-community edges gray — reveals cluster boundaries).",
+                Props(
+                    ("window", "string", "Window ID", true),
+                    ("node_mode", "string",
+                        "Node color mode: community, degree, in_out_ratio", false),
+                    ("edge_mode", "string",
+                        "Edge color mode: uniform, community", false))),
+
+            ToolDef("get_color_mode",
+                "Get the current node and edge color mode for a window.",
+                PropsReq(("window", "string", "Window ID"))),
         };
     }
 
@@ -472,6 +491,10 @@ public class McpServer
                 "get_render_stats" => GetRenderStats(args),
                 "reset_render_stats" => ResetRenderStats(args),
                 "set_render_option" => SetRenderOption(args),
+
+                // ── Color modes ───────────────────────────────────────────
+                "set_color_mode" => SetColorMode(args),
+                "get_color_mode" => GetColorMode(args),
 
                 _ => throw new InvalidOperationException(
                     $"Unknown tool: {toolName}"),
@@ -906,6 +929,40 @@ public class McpServer
             sv.Invalidate();
             return $"Set {option}={value}";
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // Color mode tools
+    // -----------------------------------------------------------------------
+
+    private string SetColorMode(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        string? nodeMode = OptArg(args, "node_mode");
+        string? edgeMode = OptArg(args, "edge_mode");
+
+        // Validate modes before touching UI
+        if (nodeMode != null && !NodeColorProvider.NodeModes.Contains(nodeMode))
+            return $"Invalid node_mode: {nodeMode}. Valid: {string.Join(", ", NodeColorProvider.NodeModes)}";
+        if (edgeMode != null && !NodeColorProvider.EdgeModes.Contains(edgeMode))
+            return $"Invalid edge_mode: {edgeMode}. Valid: {string.Join(", ", NodeColorProvider.EdgeModes)}";
+
+        return InvokeOnUI(() =>
+        {
+            if (nodeMode != null)
+                win.SetNodeColorMode(nodeMode);
+            if (edgeMode != null)
+                win.SetEdgeColorMode(edgeMode);
+
+            return $"Color modes: node={win.NodeColorMode}, edge={win.EdgeColorMode}";
+        });
+    }
+
+    private string GetColorMode(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        return InvokeOnUI(() =>
+            $"node_mode={win.NodeColorMode}, edge_mode={win.EdgeColorMode}");
     }
 
     // -----------------------------------------------------------------------
@@ -1424,6 +1481,11 @@ public class McpServer
     {
         return args?[name]?.GetValue<string>()
             ?? throw new ArgumentException($"Missing argument: {name}");
+    }
+
+    private static string? OptArg(JsonNode? args, string name)
+    {
+        return args?[name]?.GetValue<string>();
     }
 
     private static string ArgOr(JsonNode? args, string name, string fallback)

@@ -45,6 +45,56 @@ public class VizWindow : Form
         fileMenu.DropDownItems.Add(exitItem);
         _menuStrip.Items.Add(fileMenu);
 
+        // ── Color menu ──────────────────────────────────────────────────
+        var colorMenu = new ToolStripMenuItem("&Color");
+
+        // Node color sub-menu
+        var nodeColorMenu = new ToolStripMenuItem("&Node Color");
+        var nodeColorItems = new (string label, string mode)[]
+        {
+            ("Community", "community"),
+            ("Degree Centrality", "degree"),
+            ("In/Out Ratio (directed)", "in_out_ratio"),
+        };
+        foreach (var (label, mode) in nodeColorItems)
+        {
+            var item = new ToolStripMenuItem(label);
+            item.Tag = mode;
+            item.Click += (_, _) =>
+            {
+                _graphView!.NodeColorMode = mode;
+                _skiaView!.NodeColorMode = mode;
+                UpdateColorMenuChecks(nodeColorMenu, mode);
+            };
+            if (mode == "community") item.Checked = true;
+            nodeColorMenu.DropDownItems.Add(item);
+        }
+        colorMenu.DropDownItems.Add(nodeColorMenu);
+
+        // Edge color sub-menu
+        var edgeColorMenu = new ToolStripMenuItem("&Edge Color");
+        var edgeColorItems = new (string label, string mode)[]
+        {
+            ("Uniform", "uniform"),
+            ("Community (intra/inter)", "community"),
+        };
+        foreach (var (label, mode) in edgeColorItems)
+        {
+            var item = new ToolStripMenuItem(label);
+            item.Tag = mode;
+            item.Click += (_, _) =>
+            {
+                _graphView!.EdgeColorMode = mode;
+                _skiaView!.EdgeColorMode = mode;
+                UpdateColorMenuChecks(edgeColorMenu, mode);
+            };
+            if (mode == "uniform") item.Checked = true;
+            edgeColorMenu.DropDownItems.Add(item);
+        }
+        colorMenu.DropDownItems.Add(edgeColorMenu);
+
+        _menuStrip.Items.Add(colorMenu);
+
         // ── Graph view (fills the window) ───────────────────────────────
         _graphView = new GraphView { Dock = DockStyle.Fill };
         _skiaView = new SkiaGraphView { Dock = DockStyle.Fill, Visible = false };
@@ -82,6 +132,33 @@ public class VizWindow : Form
     }
 
     public void SetStatus(string text) => _statusLabel.Text = text;
+
+    /// <summary>Set the node color mode on both renderers.</summary>
+    public void SetNodeColorMode(string mode)
+    {
+        _graphView.NodeColorMode = mode;
+        _skiaView.NodeColorMode = mode;
+    }
+
+    /// <summary>Set the edge color mode on both renderers.</summary>
+    public void SetEdgeColorMode(string mode)
+    {
+        _graphView.EdgeColorMode = mode;
+        _skiaView.EdgeColorMode = mode;
+    }
+
+    /// <summary>Get the current node color mode.</summary>
+    public string NodeColorMode => _useSkia ? _skiaView.NodeColorMode : _graphView.NodeColorMode;
+
+    /// <summary>Get the current edge color mode.</summary>
+    public string EdgeColorMode => _useSkia ? _skiaView.EdgeColorMode : _graphView.EdgeColorMode;
+
+    /// <summary>Update check marks on a color sub-menu to show the active mode.</summary>
+    private static void UpdateColorMenuChecks(ToolStripMenuItem parentMenu, string activeMode)
+    {
+        foreach (ToolStripMenuItem item in parentMenu.DropDownItems)
+            item.Checked = (string)item.Tag! == activeMode;
+    }
 
     /// <summary>Switch between GDI+ and Skia renderer. Transfers graph state.</summary>
     public void SetRenderer(bool useSkia)

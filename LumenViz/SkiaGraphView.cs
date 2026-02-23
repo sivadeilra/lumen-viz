@@ -111,6 +111,43 @@ public class SkiaGraphView : Control
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public string LodMode { get; set; } = "auto";
 
+    // ── Color mode ──────────────────────────────────────────────────────
+    private readonly NodeColorProvider _colorProvider = new();
+    private string _nodeColorMode = "community";
+    private string _edgeColorMode = "uniform";
+    private Rgba32[] _nodeColors = Array.Empty<Rgba32>();
+    private Rgba32[] _edgeColors = Array.Empty<Rgba32>();
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public string NodeColorMode
+    {
+        get => _nodeColorMode;
+        set
+        {
+            _nodeColorMode = value;
+            RefreshColors();
+            Invalidate();
+        }
+    }
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public string EdgeColorMode
+    {
+        get => _edgeColorMode;
+        set
+        {
+            _edgeColorMode = value;
+            RefreshColors();
+            Invalidate();
+        }
+    }
+
+    private void RefreshColors()
+    {
+        _nodeColors = _colorProvider.GetNodeColors(_nodeColorMode);
+        _edgeColors = _colorProvider.GetEdgeColors(_edgeColorMode);
+    }
+
     // ── Performance instrumentation ─────────────────────────────────────
     private readonly Stopwatch _frameSw = new();
     private readonly Stopwatch _phaseSw = new();
@@ -215,6 +252,8 @@ public class SkiaGraphView : Control
         _currentLevel = 0;
         _selection.Clear();
         ShowParentHighlight = graph.NodeCount <= ParentHighlightAutoDisableThreshold;
+        _colorProvider.SetGraph(graph);
+        RefreshColors();
         StopAnimation();
         AutoFit();
         Invalidate();
@@ -227,6 +266,8 @@ public class SkiaGraphView : Control
         _currentLevel = 0;
         _selection.Clear();
         ShowParentHighlight = graph.NodeCount <= ParentHighlightAutoDisableThreshold;
+        _colorProvider.SetGraph(graph);
+        RefreshColors();
         StopAnimation();
         AutoFit();
         Invalidate();
@@ -299,6 +340,7 @@ public class SkiaGraphView : Control
         if (ShowEdges)
         {
             int edgeAlpha = Math.Clamp((int)(EdgeAlpha * 255), 10, 255);
+            bool useEdgeColors = _edgeColorMode != "uniform" && _edgeColors.Length > 0;
             using var edgePaint = new SKPaint
             {
                 Color = new SKColor(120, 130, 150, (byte)edgeAlpha),
@@ -324,6 +366,14 @@ public class SkiaGraphView : Control
                         new PointF(ax, ay), new PointF(bx, by),
                         new RectangleF(viewL, viewT, viewR - viewL, viewB - viewT)))
                         continue;
+                }
+
+                if (useEdgeColors && ei < _edgeColors.Length)
+                {
+                    var ec = _edgeColors[ei];
+                    // Blend the per-edge alpha with the user's EdgeAlpha slider
+                    int a = Math.Clamp((int)(ec.A * EdgeAlpha / 0.3f), 10, 255);
+                    edgePaint.Color = new SKColor(ec.R, ec.G, ec.B, (byte)a);
                 }
 
                 canvas.DrawLine(ax, ay, bx, by, edgePaint);
@@ -394,7 +444,8 @@ public class SkiaGraphView : Control
                 }
 
                 float nr = r + Math.Min(degree[i] * 0.3f, 6f);
-                fillPaint.Color = SkPalette[community[i] % SkPalette.Length];
+                var nc = _nodeColors.Length > i ? _nodeColors[i] : new Rgba32(140, 160, 200);
+                fillPaint.Color = new SKColor(nc.R, nc.G, nc.B, nc.A);
 
                 if (lowDetail)
                 {
@@ -928,6 +979,8 @@ public class SkiaGraphView : Control
             _currentLevel = level;
             _graph = _hierarchy.Graphs[level];
             _selection.Clear();
+            _colorProvider.SetGraph(_graph);
+            RefreshColors();
             AutoFit();
             Invalidate();
             LevelChanged?.Invoke();
@@ -1043,6 +1096,8 @@ public class SkiaGraphView : Control
     {
         _currentLevel = _animTargetLevel;
         _graph = _hierarchy!.Graphs[_currentLevel];
+        _colorProvider.SetGraph(_graph);
+        RefreshColors();
 
         if (_animToX != null && _animToY != null)
         {
