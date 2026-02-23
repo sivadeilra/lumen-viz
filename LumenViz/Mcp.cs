@@ -238,7 +238,8 @@ public class McpServer
                 Props(
                     ("title", "string", "Window title", false),
                     ("width", "string", "Client width in pixels (default 1280)", false),
-                    ("height", "string", "Client height in pixels (default 800)", false))),
+                    ("height", "string", "Client height in pixels (default 800)", false),
+                    ("viewer_type", "string", "Viewer type: 'force' (default) or 'matrix'", false))),
 
             ToolDef("close_window",
                 "Close a window by ID.",
@@ -547,6 +548,41 @@ public class McpServer
                 Props(
                     ("graph", "string", "Graph ID", true),
                     ("window", "string", "Window ID (auto-creates if needed)", true))),
+
+            // ── Viewer type ────────────────────────────────────────────
+            ToolDef("set_viewer_type",
+                "Switch a window between viewer types: 'force' (force-directed layout) " +
+                "or 'matrix' (adjacency matrix heatmap). Graph state is transferred " +
+                "automatically. Press 'V' in a window to cycle viewer types.",
+                Props(
+                    ("window", "string", "Window ID", true),
+                    ("type", "string", "Viewer type: 'force' or 'matrix'", true))),
+
+            // ── Matrix viewer settings ─────────────────────────────────
+            ToolDef("set_matrix_ordering",
+                "Set the node ordering mode for the adjacency matrix viewer. " +
+                "Modes: 'community' (grouped by community, default), 'original' (file order), " +
+                "'degree' (sorted by degree), 'bfs' (bandwidth-minimizing BFS from highest-degree node), " +
+                "or any metric name (e.g. 'pagerank', 'betweenness').",
+                Props(
+                    ("window", "string", "Window ID", true),
+                    ("ordering", "string", "Ordering mode", true))),
+
+            ToolDef("set_color_ramp",
+                "Set the color ramp for the adjacency matrix heatmap. " +
+                "Ramps: 'thermal' (black→blue→cyan→yellow→white, default), " +
+                "'viridis' (perceptually uniform purple→green→yellow), " +
+                "'grayscale' (black→white), 'cyan' (black→cyan).",
+                Props(
+                    ("window", "string", "Window ID", true),
+                    ("ramp", "string", "Color ramp name", true))),
+
+            ToolDef("set_log_scale",
+                "Toggle log-scale density in the adjacency matrix viewer. " +
+                "Log scale makes sparse regions more visible (enabled by default).",
+                Props(
+                    ("window", "string", "Window ID", true),
+                    ("enabled", "string", "true or false", true))),
         };
     }
 
@@ -999,6 +1035,14 @@ public class McpServer
                 "graph_fft" => GraphFft(args),
                 "graph_show" => GraphShow(args),
 
+                // ── Viewer type ──────────────────────────────────────────
+                "set_viewer_type" => SetViewerType(args),
+
+                // ── Matrix viewer settings ───────────────────────────────
+                "set_matrix_ordering" => SetMatrixOrdering(args),
+                "set_color_ramp" => SetColorRamp(args),
+                "set_log_scale" => SetLogScale(args),
+
                 _ => throw new InvalidOperationException(
                     $"Unknown tool: {toolName}"),
             };
@@ -1020,12 +1064,13 @@ public class McpServer
         string title = ArgOr(args, "title", "Lumen Viz  ◇");
         int width = IntArg(args, "width", 1280);
         int height = IntArg(args, "height", 800);
+        string viewerType = ArgOr(args, "viewer_type", "force");
         int num = Interlocked.Increment(ref _windowCounter);
         string winId = $"win{num}";
 
         InvokeOnUI(() =>
         {
-            var window = new VizWindow(winId, title, width, height);
+            var window = new VizWindow(winId, title, width, height, viewerType);
             window.WindowClosed += OnWindowClosed;
             _windows[winId] = window;
             window.Show();
@@ -1068,8 +1113,8 @@ public class McpServer
                     ["title"] = win.Text,
                     ["width"] = win.ClientSize.Width,
                     ["height"] = win.ClientSize.Height,
-                    ["has_graph"] = win.GraphView.GetGraph() != null,
-                    ["selected"] = win.GraphView.Selection.Count,
+                    ["has_graph"] = win.Viewer.GetGraph() != null,
+                    ["selected"] = win.Viewer.Selection.Count,
                 });
             }
             return new JsonObject { ["windows"] = list }.ToJsonString();
@@ -1081,7 +1126,7 @@ public class McpServer
         var win = GetWindow(args);
         return InvokeOnUI(() =>
         {
-            var graph = win.GraphView.GetGraph();
+            var graph = win.Viewer.GetGraph();
             var info = new JsonObject
             {
                 ["id"] = win.WindowId,
@@ -1089,6 +1134,7 @@ public class McpServer
                 ["width"] = win.ClientSize.Width,
                 ["height"] = win.ClientSize.Height,
                 ["windowState"] = win.WindowState.ToString(),
+                ["viewer_type"] = win.Viewer.ViewerType,
             };
             if (graph != null)
             {
@@ -1096,18 +1142,18 @@ public class McpServer
                 info["graph_nodes"] = graph.NodeCount;
                 info["graph_edges"] = graph.EdgeCount;
                 info["graph_communities"] = CountCommunities(graph);
-                info["selected_nodes"] = win.GraphView.Selection.Count;
+                info["selected_nodes"] = win.Viewer.Selection.Count;
 
-                var hierarchy = win.GraphView.GetHierarchy();
+                var hierarchy = win.Viewer.GetHierarchy();
                 if (hierarchy != null)
                 {
                     info["coarsening_levels"] = hierarchy.LevelCount;
-                    info["current_level"] = win.GraphView.CurrentLevel;
+                    info["current_level"] = win.Viewer.CurrentLevel;
                 }
             }
 
             // Include render performance stats
-            var stats = win.GraphView.GetRenderStats();
+            var stats = win.Viewer.GetRenderStats();
             info["render_stats"] = JsonSerializer.SerializeToNode(stats);
 
             return info.ToJsonString();
@@ -1178,8 +1224,8 @@ public class McpServer
         InvokeOnUI(() =>
         {
             win.ClientSize = new Size(w, h);
-            win.GraphView.AutoFit();
-            win.GraphView.Invalidate();
+            win.Viewer.AutoFit();
+            win.ViewerControl.Invalidate();
         });
         return "OK";
     }
@@ -1214,8 +1260,8 @@ public class McpServer
                     screen.Left + col * cellW,
                     screen.Top + row * cellH);
                 win.ClientSize = new Size(cellW, cellH);
-                win.GraphView.AutoFit();
-                win.GraphView.Invalidate();
+                win.Viewer.AutoFit();
+                win.ViewerControl.Invalidate();
             }
 
             return $"Arranged {count} windows in {cols}x{rows} grid";
@@ -1231,10 +1277,10 @@ public class McpServer
         var win = GetWindow(args);
         return InvokeOnUI(() =>
         {
-            var graph = win.GraphView.GetGraph();
+            var graph = win.Viewer.GetGraph();
             if (graph == null) return "No graph loaded";
 
-            var selection = win.GraphView.Selection;
+            var selection = win.Viewer.Selection;
             var nodes = new JsonArray();
             foreach (int i in selection)
             {
@@ -1262,7 +1308,7 @@ public class McpServer
             var list = new JsonArray();
             foreach (var (id, win) in _windows)
             {
-                int count = win.GraphView.Selection.Count;
+                int count = win.Viewer.Selection.Count;
                 list.Add(new JsonObject
                 {
                     ["window"] = id,
@@ -1279,8 +1325,7 @@ public class McpServer
         var win = GetWindow(args);
         return InvokeOnUI(() =>
         {
-            win.GraphView.ClearSelection();
-            win.SkiaView.ClearSelection();
+            win.Viewer.ClearSelection();
             return $"Selection cleared in {win.WindowId}";
         });
     }
@@ -1296,9 +1341,8 @@ public class McpServer
 
         return InvokeOnUI(() =>
         {
-            win.GraphView.SetSelection(indices);
-            win.SkiaView.SetSelection(indices);
-            return $"Selected {win.GraphView.Selection.Count} nodes in {win.WindowId}";
+            win.Viewer.SetSelection(indices);
+            return $"Selected {win.Viewer.Selection.Count} nodes in {win.WindowId}";
         });
     }
 
@@ -1312,7 +1356,7 @@ public class McpServer
 
         return InvokeOnUI(() =>
         {
-            var graph = win.GraphView.GetGraph();
+            var graph = win.Viewer.GetGraph();
             if (graph == null) return "No graph loaded";
 
             var provider = new LumenGraph.NodeColorProvider();
@@ -1331,8 +1375,7 @@ public class McpServer
             else
                 sorted = candidates.OrderByDescending(i => values[i]).Take(count).ToArray();
 
-            win.GraphView.SetSelection(sorted);
-            win.SkiaView.SetSelection(sorted);
+            win.Viewer.SetSelection(sorted);
 
             // Build response with node details
             var nodes = new JsonArray();
@@ -1366,7 +1409,7 @@ public class McpServer
         var win = GetWindow(args);
         return InvokeOnUI(() =>
         {
-            var hierarchy = win.GraphView.GetHierarchy();
+            var hierarchy = win.Viewer.GetHierarchy();
             if (hierarchy == null) return "No coarsening hierarchy available";
 
             var levels = new JsonArray();
@@ -1382,13 +1425,13 @@ public class McpServer
                     ["nodes"] = g.NodeCount,
                     ["edges"] = g.EdgeCount,
                     ["memory_bytes"] = mem,
-                    ["is_current"] = (i == win.GraphView.CurrentLevel),
+                    ["is_current"] = (i == win.Viewer.CurrentLevel),
                 });
             }
             return new JsonObject
             {
                 ["window"] = win.WindowId,
-                ["current_level"] = win.GraphView.CurrentLevel,
+                ["current_level"] = win.Viewer.CurrentLevel,
                 ["level_count"] = hierarchy.LevelCount,
                 ["total_memory_bytes"] = totalMemory,
                 ["levels"] = levels,
@@ -1402,7 +1445,7 @@ public class McpServer
         int level = int.Parse(Arg(args, "level"));
         return InvokeOnUI(() =>
         {
-            if (win.GraphView.SetLevel(level))
+            if (win.Viewer.SetLevel(level))
                 return $"Navigating to level {level}";
             return $"Cannot navigate to level {level} — out of range or no hierarchy";
         });
@@ -1417,9 +1460,7 @@ public class McpServer
         var win = GetWindow(args);
         return InvokeOnUI(() =>
         {
-            var stats = win.UseSkia
-                ? win.SkiaView.GetRenderStats()
-                : win.GraphView.GetRenderStats();
+            var stats = win.Viewer.GetRenderStats();
             return System.Text.Json.JsonSerializer.Serialize(stats,
                 new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
         });
@@ -1430,16 +1471,8 @@ public class McpServer
         var win = GetWindow(args);
         return InvokeOnUI(() =>
         {
-            if (win.UseSkia)
-            {
-                win.SkiaView.ResetRenderStats();
-                win.SkiaView.Invalidate();
-            }
-            else
-            {
-                win.GraphView.ResetRenderStats();
-                win.GraphView.Invalidate();
-            }
+            win.Viewer.ResetRenderStats();
+            win.ViewerControl.Invalidate();
             return "Render stats reset. Next paint will start fresh EMA.";
         });
     }
@@ -1452,67 +1485,57 @@ public class McpServer
 
         return InvokeOnUI(() =>
         {
-            // Handle renderer switch first (applies at window level)
-            if (option == "renderer")
+            // Handle viewer type switch (replaces the old renderer toggle)
+            if (option == "viewer_type")
             {
-                bool skia = value.Equals("skia", StringComparison.OrdinalIgnoreCase);
-                bool gdi = value.Equals("gdi", StringComparison.OrdinalIgnoreCase)
-                    || value.Equals("gdi+", StringComparison.OrdinalIgnoreCase);
-                if (!skia && !gdi)
-                    return $"Invalid renderer: {value}. Use 'skia' or 'gdi'.";
-                win.SetRenderer(skia);
-                return $"Switched to {(skia ? "Skia" : "GDI+")} renderer.";
+                if (value is not ("force" or "matrix"))
+                    return $"Invalid viewer_type: {value}. Use 'force' or 'matrix'.";
+                win.SetViewerType(value);
+                return $"Switched to {value} viewer.";
             }
 
-            var gv = win.GraphView;
+            var viewer = win.Viewer;
             bool boolVal = value.Equals("true", StringComparison.OrdinalIgnoreCase)
                 || value == "1" || value.Equals("yes", StringComparison.OrdinalIgnoreCase);
 
+            // Interface-level settings (all viewer types)
             switch (option)
             {
-                case "anti_alias": gv.AntiAlias = boolVal; break;
-                case "show_edges": gv.ShowEdges = boolVal; break;
-                case "show_nodes": gv.ShowNodes = boolVal; break;
-                case "show_outlines": gv.ShowOutlines = boolVal; break;
-                case "show_labels": gv.ShowLabels = boolVal; break;
-                case "show_minimap": gv.ShowMinimap = boolVal; break;
-                case "show_levels_panel": gv.ShowLevelsPanel = boolVal; break;
-                case "show_parent_highlight": gv.ShowParentHighlight = boolVal; break;
-                case "show_off_screen_indicators": gv.ShowOffScreenIndicators = boolVal; break;
-                case "show_selection_glow": gv.ShowSelectionGlow = boolVal; break;
-                case "lod_mode":
-                    if (value is "auto" or "low" or "high")
-                        gv.LodMode = value;
-                    else
-                        return $"Invalid lod_mode value: {value}. Use auto, low, or high.";
-                    break;
+                case "show_edges": viewer.ShowEdges = boolVal; break;
+                case "show_nodes": viewer.ShowNodes = boolVal; break;
+                case "show_labels": viewer.ShowLabels = boolVal; break;
+                case "show_minimap": viewer.ShowMinimap = boolVal; break;
                 default:
-                    return $"Unknown option: {option}";
-            }
-
-            // Apply the same setting to the Skia view too
-            var sv = win.SkiaView;
-            switch (option)
-            {
-                case "anti_alias": sv.AntiAlias = boolVal; break;
-                case "show_edges": sv.ShowEdges = boolVal; break;
-                case "show_nodes": sv.ShowNodes = boolVal; break;
-                case "show_outlines": sv.ShowOutlines = boolVal; break;
-                case "show_labels": sv.ShowLabels = boolVal; break;
-                case "show_minimap": sv.ShowMinimap = boolVal; break;
-                case "show_levels_panel": sv.ShowLevelsPanel = boolVal; break;
-                case "show_parent_highlight": sv.ShowParentHighlight = boolVal; break;
-                case "show_off_screen_indicators": sv.ShowOffScreenIndicators = boolVal; break;
-                case "show_selection_glow": sv.ShowSelectionGlow = boolVal; break;
-                case "lod_mode":
-                    sv.LodMode = value;
+                    // SkiaGraphView-specific settings
+                    if (viewer is SkiaGraphView skia)
+                    {
+                        switch (option)
+                        {
+                            case "anti_alias": skia.AntiAlias = boolVal; break;
+                            case "show_outlines": skia.ShowOutlines = boolVal; break;
+                            case "show_levels_panel": skia.ShowLevelsPanel = boolVal; break;
+                            case "show_parent_highlight": skia.ShowParentHighlight = boolVal; break;
+                            case "show_off_screen_indicators": skia.ShowOffScreenIndicators = boolVal; break;
+                            case "show_selection_glow": skia.ShowSelectionGlow = boolVal; break;
+                            case "lod_mode":
+                                if (value is "auto" or "low" or "high")
+                                    skia.LodMode = value;
+                                else
+                                    return $"Invalid lod_mode value: {value}. Use auto, low, or high.";
+                                break;
+                            default:
+                                return $"Unknown option: {option}";
+                        }
+                    }
+                    else
+                    {
+                        return $"Option '{option}' not supported by {viewer.ViewerType} viewer";
+                    }
                     break;
             }
 
-            gv.ResetRenderStats(); // fresh stats after changing a setting
-            sv.ResetRenderStats();
-            gv.Invalidate();
-            sv.Invalidate();
+            viewer.ResetRenderStats();
+            win.ViewerControl.Invalidate();
             return $"Set {option}={value}";
         });
     }
@@ -1929,27 +1952,16 @@ public class McpServer
         InvokeOnUI(() =>
         {
             if (hierarchy != null)
-            {
-                if (win.UseSkia)
-                    win.SkiaView.SetGraphWithHierarchy(graph, hierarchy);
-                else
-                    win.GraphView.SetGraphWithHierarchy(graph, hierarchy);
-            }
+                win.Viewer.SetGraphWithHierarchy(graph, hierarchy);
             else
-            {
-                if (win.UseSkia)
-                    win.SkiaView.SetGraph(graph);
-                else
-                    win.GraphView.SetGraph(graph);
-            }
+                win.Viewer.SetGraph(graph);
 
             var c = CountCommunities(graph);
-            string renderer = win.UseSkia ? "Skia" : "GDI+";
             win.SetStatus(
                 $"◇  {graph.Title}  —  {graph.NodeCount} nodes, " +
                 $"{graph.EdgeCount} edges, {c} communities" +
                 (hierarchy != null ? $", {hierarchy.LevelCount} levels" : "") +
-                $"  [{renderer}]");
+                $"  [{win.Viewer.ViewerType}]");
         });
 
         return new JsonObject
@@ -1960,6 +1972,64 @@ public class McpServer
             ["edges"] = graph.EdgeCount,
             ["status"] = "displayed",
         }.ToJsonString();
+    }
+
+    // -----------------------------------------------------------------------
+    // Viewer type tools
+    // -----------------------------------------------------------------------
+
+    private string SetViewerType(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        string type = Arg(args, "type");
+        if (type is not ("force" or "matrix"))
+            return $"Invalid viewer type: {type}. Use 'force' or 'matrix'.";
+
+        return InvokeOnUI(() =>
+        {
+            win.SetViewerType(type);
+            return $"Switched to {type} viewer in {win.WindowId}";
+        });
+    }
+
+    private string SetMatrixOrdering(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        string ordering = Arg(args, "ordering");
+        return InvokeOnUI(() =>
+        {
+            if (win.Viewer is not MatrixView mv)
+                return "Window is not in matrix view mode. Use set_viewer_type first.";
+            mv.OrderingMode = ordering;
+            return $"Set matrix ordering to '{ordering}'";
+        });
+    }
+
+    private string SetColorRamp(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        string ramp = Arg(args, "ramp");
+        return InvokeOnUI(() =>
+        {
+            if (win.Viewer is not MatrixView mv)
+                return "Window is not in matrix view mode. Use set_viewer_type first.";
+            mv.ColorRamp = ramp;
+            return $"Set color ramp to '{ramp}'";
+        });
+    }
+
+    private string SetLogScale(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        bool enabled = Arg(args, "enabled")
+            .Equals("true", StringComparison.OrdinalIgnoreCase);
+        return InvokeOnUI(() =>
+        {
+            if (win.Viewer is not MatrixView mv)
+                return "Window is not in matrix view mode. Use set_viewer_type first.";
+            mv.LogScale = enabled;
+            return $"Log scale {(enabled ? "enabled" : "disabled")}";
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -1996,30 +2066,17 @@ public class McpServer
 
         InvokeOnUI(() =>
         {
-            // Load into the currently-active view. The inactive view
-            // will get the graph when SetRenderer() is called.
             if (hierarchy != null)
-            {
-                if (win.UseSkia)
-                    win.SkiaView.SetGraphWithHierarchy(graph, hierarchy);
-                else
-                    win.GraphView.SetGraphWithHierarchy(graph, hierarchy);
-            }
+                win.Viewer.SetGraphWithHierarchy(graph, hierarchy);
             else
-            {
-                if (win.UseSkia)
-                    win.SkiaView.SetGraph(graph);
-                else
-                    win.GraphView.SetGraph(graph);
-            }
+                win.Viewer.SetGraph(graph);
 
             var c = CountCommunities(graph);
-            string renderer = win.UseSkia ? "Skia" : "GDI+";
             win.SetStatus(
                 $"◇  {graph.Title}  —  {graph.NodeCount} nodes, " +
                 $"{graph.EdgeCount} edges, {c} communities" +
                 (hierarchy != null ? $", {hierarchy.LevelCount} levels" : "") +
-                $"  [{renderer}]");
+                $"  [{win.Viewer.ViewerType}]");
         });
 
         var communities = CountCommunities(graph);
@@ -2045,7 +2102,7 @@ public class McpServer
         var win = GetWindow(args);
         return InvokeOnUI(() =>
         {
-            var graph = win.GraphView.GetGraph();
+            var graph = win.Viewer.GetGraph();
             if (graph == null) return "No graph loaded";
             return new JsonObject
             {
@@ -2054,6 +2111,7 @@ public class McpServer
                 ["edges"] = graph.EdgeCount,
                 ["directed"] = graph.IsDirected,
                 ["communities"] = CountCommunities(graph),
+                ["viewer_type"] = win.Viewer.ViewerType,
             }.ToJsonString();
         });
     }
@@ -2064,16 +2122,16 @@ public class McpServer
         var win = GetWindow(args);
         return InvokeOnUI(() =>
         {
-            var graph = win.GraphView.GetGraph();
+            var graph = win.Viewer.GetGraph();
             if (graph == null) return "No graph loaded";
 
             var hierarchy = RunLayout(graph, iterations, 0.05, layoutMode, bounded, aspectRatio);
             if (hierarchy != null)
-                win.GraphView.SetGraphWithHierarchy(graph, hierarchy);
+                win.Viewer.SetGraphWithHierarchy(graph, hierarchy);
             else
             {
-                win.GraphView.AutoFit();
-                win.GraphView.Invalidate();
+                win.Viewer.AutoFit();
+                win.ViewerControl.Invalidate();
             }
             return "Layout recomputed" +
                 (hierarchy != null ? $" ({hierarchy.LevelCount} levels)" : "");
@@ -2133,16 +2191,8 @@ public class McpServer
         var win = GetWindow(args);
         InvokeOnUI(() =>
         {
-            if (win.UseSkia)
-            {
-                win.SkiaView.AutoFit();
-                win.SkiaView.Invalidate();
-            }
-            else
-            {
-                win.GraphView.AutoFit();
-                win.GraphView.Invalidate();
-            }
+            win.Viewer.AutoFit();
+            win.ViewerControl.Invalidate();
         });
         return "OK";
     }
@@ -2158,8 +2208,8 @@ public class McpServer
             .Equals("true", StringComparison.OrdinalIgnoreCase);
         InvokeOnUI(() =>
         {
-            win.GraphView.ShowLabels = show;
-            win.GraphView.Invalidate();
+            win.Viewer.ShowLabels = show;
+            win.ViewerControl.Invalidate();
         });
         return "OK";
     }
@@ -2172,8 +2222,8 @@ public class McpServer
         {
             InvokeOnUI(() =>
             {
-                win.GraphView.NodeRadius = r;
-                win.GraphView.Invalidate();
+                win.Viewer.NodeRadius = r;
+                win.ViewerControl.Invalidate();
             });
         }
         return "OK";
@@ -2187,8 +2237,8 @@ public class McpServer
         {
             InvokeOnUI(() =>
             {
-                win.GraphView.EdgeAlpha = a;
-                win.GraphView.Invalidate();
+                win.Viewer.EdgeAlpha = a;
+                win.ViewerControl.Invalidate();
             });
         }
         return "OK";
@@ -2237,13 +2287,12 @@ public class McpServer
             int count = parts.Length > 1 && int.TryParse(parts[1], out var c) ? c : 20;
             return InvokeOnUI(() =>
             {
-                var gv = win.GraphView;
-                gv.ResetRenderStats();
+                win.Viewer.ResetRenderStats();
                 for (int i = 0; i < count; i++)
                 {
-                    gv.Refresh(); // synchronous paint
+                    win.ViewerControl.Refresh(); // synchronous paint
                 }
-                var stats = gv.GetRenderStats();
+                var stats = win.Viewer.GetRenderStats();
                 return JsonSerializer.Serialize(stats,
                     new JsonSerializerOptions { WriteIndented = true });
             });
@@ -2256,7 +2305,7 @@ public class McpServer
     {
         return InvokeOnUI(() =>
         {
-            var stats = win.GraphView.GetRenderStats();
+            var stats = win.Viewer.GetRenderStats();
             return JsonSerializer.Serialize(stats,
                 new JsonSerializerOptions { WriteIndented = true });
         });
@@ -2266,8 +2315,8 @@ public class McpServer
     {
         return InvokeOnUI(() =>
         {
-            win.GraphView.ResetRenderStats();
-            win.GraphView.Invalidate();
+            win.Viewer.ResetRenderStats();
+            win.ViewerControl.Invalidate();
             return "Render stats reset.";
         });
     }
@@ -2276,34 +2325,46 @@ public class McpServer
     {
         return InvokeOnUI(() =>
         {
-            var gv = win.GraphView;
+            var viewer = win.Viewer;
             bool boolVal = value.Equals("true", StringComparison.OrdinalIgnoreCase)
                 || value == "1" || value.Equals("yes", StringComparison.OrdinalIgnoreCase);
 
             switch (option)
             {
-                case "anti_alias": gv.AntiAlias = boolVal; break;
-                case "show_edges": gv.ShowEdges = boolVal; break;
-                case "show_nodes": gv.ShowNodes = boolVal; break;
-                case "show_outlines": gv.ShowOutlines = boolVal; break;
-                case "show_labels": gv.ShowLabels = boolVal; break;
-                case "show_minimap": gv.ShowMinimap = boolVal; break;
-                case "show_levels_panel": gv.ShowLevelsPanel = boolVal; break;
-                case "show_parent_highlight": gv.ShowParentHighlight = boolVal; break;
-                case "show_off_screen_indicators": gv.ShowOffScreenIndicators = boolVal; break;
-                case "show_selection_glow": gv.ShowSelectionGlow = boolVal; break;
-                case "lod_mode":
-                    if (value is "auto" or "low" or "high")
-                        gv.LodMode = value;
-                    else
-                        return $"Invalid lod_mode: {value}. Use auto, low, high.";
-                    break;
+                case "show_edges": viewer.ShowEdges = boolVal; break;
+                case "show_nodes": viewer.ShowNodes = boolVal; break;
+                case "show_labels": viewer.ShowLabels = boolVal; break;
+                case "show_minimap": viewer.ShowMinimap = boolVal; break;
                 default:
-                    return $"Unknown option: {option}";
+                    if (viewer is SkiaGraphView skia)
+                    {
+                        switch (option)
+                        {
+                            case "anti_alias": skia.AntiAlias = boolVal; break;
+                            case "show_outlines": skia.ShowOutlines = boolVal; break;
+                            case "show_levels_panel": skia.ShowLevelsPanel = boolVal; break;
+                            case "show_parent_highlight": skia.ShowParentHighlight = boolVal; break;
+                            case "show_off_screen_indicators": skia.ShowOffScreenIndicators = boolVal; break;
+                            case "show_selection_glow": skia.ShowSelectionGlow = boolVal; break;
+                            case "lod_mode":
+                                if (value is "auto" or "low" or "high")
+                                    skia.LodMode = value;
+                                else
+                                    return $"Invalid lod_mode: {value}. Use auto, low, high.";
+                                break;
+                            default:
+                                return $"Unknown option: {option}";
+                        }
+                    }
+                    else
+                    {
+                        return $"Option '{option}' not supported by {viewer.ViewerType} viewer";
+                    }
+                    break;
             }
 
-            gv.ResetRenderStats();
-            gv.Invalidate();
+            viewer.ResetRenderStats();
+            win.ViewerControl.Invalidate();
             return $"Set {option}={value}";
         });
     }

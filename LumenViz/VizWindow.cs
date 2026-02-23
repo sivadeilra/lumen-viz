@@ -7,15 +7,16 @@ namespace LumenViz;
 
 /// <summary>
 /// A managed visualization window. Created and controlled via MCP tools.
-/// Each window has a unique ID, a GraphView, a status bar, and an
-/// interaction event queue that the MCP client can poll.
+/// Each window has a unique ID, an <see cref="IGraphViewer"/> (which is
+/// a docked Control), a status bar, and an interaction event queue.
+///
+/// The viewer type can be switched at runtime (e.g. force → matrix)
+/// via <see cref="SetViewerType"/>. Graph state is transferred automatically.
 /// </summary>
 public class VizWindow : Form
 {
     private readonly string _windowId;
-    private readonly GraphView _graphView;
-    private readonly SkiaGraphView _skiaView;
-    private bool _useSkia;
+    private IGraphViewer _viewer;
     private readonly StatusStrip _statusBar;
     private readonly ToolStripStatusLabel _statusLabel;
     private readonly MenuStrip _menuStrip;
@@ -31,11 +32,15 @@ public class VizWindow : Form
     public event Action<string>? WindowClosed;
 
     public string WindowId => _windowId;
-    public GraphView GraphView => _graphView;
-    public SkiaGraphView SkiaView => _skiaView;
-    public bool UseSkia => _useSkia;
 
-    public VizWindow(string id, string title, int width, int height)
+    /// <summary>The active graph viewer (always also a Control).</summary>
+    public IGraphViewer Viewer => _viewer;
+
+    /// <summary>The active viewer as a WinForms Control (for Invalidate, Focus, etc.).</summary>
+    public Control ViewerControl => (Control)_viewer;
+
+    public VizWindow(string id, string title, int width, int height,
+                     string viewerType = "force")
     {
         _windowId = id;
 
@@ -55,11 +60,8 @@ public class VizWindow : Form
         _showLabelsItem.CheckOnClick = true;
         _showLabelsItem.CheckedChanged += (_, _) =>
         {
-            bool on = _showLabelsItem.Checked;
-            _graphView!.ShowLabels = on;
-            _skiaView!.ShowLabels = on;
-            _graphView.Invalidate();
-            _skiaView.Invalidate();
+            _viewer.ShowLabels = _showLabelsItem.Checked;
+            ViewerControl.Invalidate();
         };
         viewMenu.DropDownItems.Add(_showLabelsItem);
 
@@ -69,11 +71,8 @@ public class VizWindow : Form
         showEdgesItem.CheckOnClick = true;
         showEdgesItem.CheckedChanged += (_, _) =>
         {
-            bool on = showEdgesItem.Checked;
-            _graphView!.ShowEdges = on;
-            _skiaView!.ShowEdges = on;
-            _graphView.Invalidate();
-            _skiaView.Invalidate();
+            _viewer.ShowEdges = showEdgesItem.Checked;
+            ViewerControl.Invalidate();
         };
         viewMenu.DropDownItems.Add(showEdgesItem);
 
@@ -83,20 +82,27 @@ public class VizWindow : Form
         showMinimapItem.CheckOnClick = true;
         showMinimapItem.CheckedChanged += (_, _) =>
         {
-            bool on = showMinimapItem.Checked;
-            _graphView!.ShowMinimap = on;
-            _skiaView!.ShowMinimap = on;
-            _graphView.Invalidate();
-            _skiaView.Invalidate();
+            _viewer.ShowMinimap = showMinimapItem.Checked;
+            ViewerControl.Invalidate();
         };
         viewMenu.DropDownItems.Add(showMinimapItem);
+
+        // Viewer type sub-menu
+        viewMenu.DropDownItems.Add(new ToolStripSeparator());
+        var viewerTypeMenu = new ToolStripMenuItem("Viewer &Type");
+        foreach (var (label, type) in new[] { ("Force Layout", "force"), ("Adjacency Matrix", "matrix") })
+        {
+            var item = new ToolStripMenuItem(label) { Tag = type };
+            item.Click += (_, _) => SetViewerType(type);
+            viewerTypeMenu.DropDownItems.Add(item);
+        }
+        viewMenu.DropDownItems.Add(viewerTypeMenu);
 
         _menuStrip.Items.Add(viewMenu);
 
         // ── Color menu ──────────────────────────────────────────────────
         var colorMenu = new ToolStripMenuItem("&Color");
 
-        // Node color sub-menu
         var nodeColorMenu = new ToolStripMenuItem("&Node Color");
         var nodeColorItems = new (string label, string mode)[]
         {
@@ -110,12 +116,10 @@ public class VizWindow : Form
         };
         foreach (var (label, mode) in nodeColorItems)
         {
-            var item = new ToolStripMenuItem(label);
-            item.Tag = mode;
+            var item = new ToolStripMenuItem(label) { Tag = mode };
             item.Click += (_, _) =>
             {
-                _graphView!.NodeColorMode = mode;
-                _skiaView!.NodeColorMode = mode;
+                _viewer.NodeColorMode = mode;
                 UpdateColorMenuChecks(nodeColorMenu, mode);
             };
             if (mode == "community") item.Checked = true;
@@ -123,7 +127,6 @@ public class VizWindow : Form
         }
         colorMenu.DropDownItems.Add(nodeColorMenu);
 
-        // Edge color sub-menu
         var edgeColorMenu = new ToolStripMenuItem("&Edge Color");
         var edgeColorItems = new (string label, string mode)[]
         {
@@ -135,12 +138,10 @@ public class VizWindow : Form
         };
         foreach (var (label, mode) in edgeColorItems)
         {
-            var item = new ToolStripMenuItem(label);
-            item.Tag = mode;
+            var item = new ToolStripMenuItem(label) { Tag = mode };
             item.Click += (_, _) =>
             {
-                _graphView!.EdgeColorMode = mode;
-                _skiaView!.EdgeColorMode = mode;
+                _viewer.EdgeColorMode = mode;
                 UpdateColorMenuChecks(edgeColorMenu, mode);
             };
             if (mode == "uniform") item.Checked = true;
@@ -150,15 +151,11 @@ public class VizWindow : Form
 
         _menuStrip.Items.Add(colorMenu);
 
-        // ── Graph view (fills the window) ───────────────────────────────
-        _graphView = new GraphView { Dock = DockStyle.Fill };
-        _skiaView = new SkiaGraphView { Dock = DockStyle.Fill, Visible = false };
-
-        // Wire level-change events so we update the status bar
-        _graphView.LevelChanged += OnLevelChanged;
-        _graphView.SelectionChanged += OnSelectionChanged;
-        _skiaView.LevelChanged += OnLevelChanged;
-        _skiaView.SelectionChanged += OnSelectionChanged;
+        // ── Create the initial viewer ───────────────────────────────────
+        _viewer = CreateViewer(viewerType);
+        var ctrl = (Control)_viewer;
+        ctrl.Dock = DockStyle.Fill;
+        WireViewerEvents();
 
         // ── Status bar ──────────────────────────────────────────────────
         _statusBar = new StatusStrip();
@@ -169,144 +166,136 @@ public class VizWindow : Form
         Text = title;
         ClientSize = new Size(width, height);
         MainMenuStrip = _menuStrip;
-        Controls.Add(_graphView);    // Dock.Fill — behind everything
-        Controls.Add(_skiaView);     // Skia view (hidden initially)
+        Controls.Add(ctrl);
         Controls.Add(_menuStrip);
         Controls.Add(_statusBar);
         StartPosition = FormStartPosition.CenterScreen;
 
         // ── Wire up interaction tracking ────────────────────────────────
-        _graphView.MouseClick += OnGraphClick;
-        _graphView.MouseDoubleClick += OnGraphDoubleClick;
-        _skiaView.MouseClick += OnGraphClick;
-        _skiaView.MouseDoubleClick += OnGraphDoubleClick;
         KeyPreview = true;
         KeyDown += OnWindowKeyDown;
         Resize += OnWindowResize;
         FormClosed += OnWindowClosed;
     }
 
+    // ════════════════════════════════════════════════════════════════════
+    // Viewer factory and switching
+    // ════════════════════════════════════════════════════════════════════
+
+    /// <summary>Create a new viewer instance of the given type.</summary>
+    public static IGraphViewer CreateViewer(string viewerType)
+    {
+        return viewerType switch
+        {
+            "matrix" => new MatrixView(),
+            _ => new SkiaGraphView(),
+        };
+    }
+
+    /// <summary>
+    /// Switch to a different viewer type. Transfers graph/hierarchy state.
+    /// </summary>
+    public void SetViewerType(string viewerType)
+    {
+        if (_viewer.ViewerType == viewerType) return;
+
+        // Capture state from old viewer
+        var graph = _viewer.GetGraph();
+        var hierarchy = _viewer.GetHierarchy();
+        var selection = _viewer.Selection.ToArray();
+
+        // Unwire old viewer
+        UnwireViewerEvents();
+        var oldCtrl = (Control)_viewer;
+        Controls.Remove(oldCtrl);
+        oldCtrl.Dispose();
+
+        // Create and install new viewer
+        _viewer = CreateViewer(viewerType);
+        var newCtrl = (Control)_viewer;
+        newCtrl.Dock = DockStyle.Fill;
+        Controls.Add(newCtrl);
+        newCtrl.SendToBack();
+        WireViewerEvents();
+
+        // Transfer state
+        if (graph != null && hierarchy != null)
+            _viewer.SetGraphWithHierarchy(graph, hierarchy);
+        else if (graph != null)
+            _viewer.SetGraph(graph);
+
+        if (selection.Length > 0)
+            _viewer.SetSelection(selection);
+
+        newCtrl.Focus();
+        UpdateStatusFromGraph();
+    }
+
+    private void WireViewerEvents()
+    {
+        _viewer.LevelChanged += OnLevelChanged;
+        _viewer.SelectionChanged += OnSelectionChanged;
+        var ctrl = (Control)_viewer;
+        ctrl.MouseClick += OnGraphClick;
+        ctrl.MouseDoubleClick += OnGraphDoubleClick;
+    }
+
+    private void UnwireViewerEvents()
+    {
+        _viewer.LevelChanged -= OnLevelChanged;
+        _viewer.SelectionChanged -= OnSelectionChanged;
+        var ctrl = (Control)_viewer;
+        ctrl.MouseClick -= OnGraphClick;
+        ctrl.MouseDoubleClick -= OnGraphDoubleClick;
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Public API (delegates to active viewer)
+    // ════════════════════════════════════════════════════════════════════
+
     public void SetStatus(string text) => _statusLabel.Text = text;
 
-    /// <summary>Set the node color mode on both renderers.</summary>
-    public void SetNodeColorMode(string mode)
-    {
-        _graphView.NodeColorMode = mode;
-        _skiaView.NodeColorMode = mode;
-    }
+    public void SetNodeColorMode(string mode) => _viewer.NodeColorMode = mode;
+    public void SetEdgeColorMode(string mode) => _viewer.EdgeColorMode = mode;
+    public string NodeColorMode => _viewer.NodeColorMode;
+    public string EdgeColorMode => _viewer.EdgeColorMode;
 
-    /// <summary>Set the edge color mode on both renderers.</summary>
-    public void SetEdgeColorMode(string mode)
-    {
-        _graphView.EdgeColorMode = mode;
-        _skiaView.EdgeColorMode = mode;
-    }
-
-    /// <summary>Get the current node color mode.</summary>
-    public string NodeColorMode => _useSkia ? _skiaView.NodeColorMode : _graphView.NodeColorMode;
-
-    /// <summary>Get the current edge color mode.</summary>
-    public string EdgeColorMode => _useSkia ? _skiaView.EdgeColorMode : _graphView.EdgeColorMode;
-
-    /// <summary>Show or hide vertex labels on both renderers and sync the menu check.</summary>
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool ShowLabels
     {
-        get => _useSkia ? _skiaView.ShowLabels : _graphView.ShowLabels;
+        get => _viewer.ShowLabels;
         set
         {
-            _graphView.ShowLabels = value;
-            _skiaView.ShowLabels = value;
+            _viewer.ShowLabels = value;
             _showLabelsItem.Checked = value;
-            _graphView.Invalidate();
-            _skiaView.Invalidate();
+            ViewerControl.Invalidate();
         }
     }
 
-    /// <summary>Update check marks on a color sub-menu to show the active mode.</summary>
     private static void UpdateColorMenuChecks(ToolStripMenuItem parentMenu, string activeMode)
     {
         foreach (ToolStripMenuItem item in parentMenu.DropDownItems)
             item.Checked = (string)item.Tag! == activeMode;
     }
 
-    /// <summary>Switch between GDI+ and Skia renderer. Transfers graph state.</summary>
-    public void SetRenderer(bool useSkia)
-    {
-        if (_useSkia == useSkia) return;
-        _useSkia = useSkia;
-
-        // Transfer graph/hierarchy from old renderer to new.
-        // IMPORTANT: Make the target view visible FIRST so AutoFit()
-        // (called by SetGraph*) has correct Width/Height.
-        if (useSkia)
-        {
-            var g = _graphView.GetGraph();
-            var h = _graphView.GetHierarchy();
-
-            _graphView.Visible = false;
-            _skiaView.Visible = true;
-
-            if (g != null && h != null)
-                _skiaView.SetGraphWithHierarchy(g, h);
-            else if (g != null)
-                _skiaView.SetGraph(g);
-
-            _skiaView.Focus();
-        }
-        else
-        {
-            var g = _skiaView.GetGraph();
-            var h = _skiaView.GetHierarchy();
-
-            _skiaView.Visible = false;
-            _graphView.Visible = true;
-
-            if (g != null && h != null)
-                _graphView.SetGraphWithHierarchy(g, h);
-            else if (g != null)
-                _graphView.SetGraph(g);
-
-            _graphView.Focus();
-        }
-
-        UpdateStatusFromGraph();
-    }
-
     /// <summary>Update status bar to reflect current graph/level/selection state.</summary>
     private void UpdateStatusFromGraph()
     {
-        GraphModel? graph;
-        CoarseningHierarchy? hierarchy;
-        int currentLevel, selCount;
-
-        if (_useSkia)
-        {
-            graph = _skiaView.GetGraph();
-            hierarchy = _skiaView.GetHierarchy();
-            currentLevel = _skiaView.CurrentLevel;
-            selCount = _skiaView.Selection.Count;
-        }
-        else
-        {
-            graph = _graphView.GetGraph();
-            hierarchy = _graphView.GetHierarchy();
-            currentLevel = _graphView.CurrentLevel;
-            selCount = _graphView.Selection.Count;
-        }
-
+        var graph = _viewer.GetGraph();
         if (graph == null) return;
 
-        string renderer = _useSkia ? "Skia" : "GDI+";
-        string status = $"◇  {graph.Title}  —  {graph.NodeCount}n, {graph.EdgeCount}e  [{renderer}]";
+        string viewerName = _viewer.ViewerType;
+        string status = $"◇  {graph.Title}  —  {graph.NodeCount}n, {graph.EdgeCount}e  [{viewerName}]";
 
+        var hierarchy = _viewer.GetHierarchy();
         if (hierarchy != null && hierarchy.LevelCount > 1)
         {
-            status += $"  |  Level {currentLevel}/{hierarchy.LevelCount - 1}";
-            if (currentLevel == 0) status += " (finest)";
-            else if (currentLevel == hierarchy.LevelCount - 1) status += " (coarsest)";
+            status += $"  |  Level {_viewer.CurrentLevel}/{hierarchy.LevelCount - 1}";
+            if (_viewer.CurrentLevel == 0) status += " (finest)";
+            else if (_viewer.CurrentLevel == hierarchy.LevelCount - 1) status += " (coarsest)";
         }
 
+        int selCount = _viewer.Selection.Count;
         if (selCount > 0)
             status += $"  |  {selCount} selected";
 
@@ -319,8 +308,8 @@ public class VizWindow : Form
         EnqueueEvent(new JsonObject
         {
             ["type"] = "level_changed",
-            ["level"] = _graphView.CurrentLevel,
-            ["level_count"] = _graphView.LevelCount,
+            ["level"] = _viewer.CurrentLevel,
+            ["level_count"] = _viewer.LevelCount,
         });
     }
 
@@ -330,7 +319,7 @@ public class VizWindow : Form
         EnqueueEvent(new JsonObject
         {
             ["type"] = "selection_changed",
-            ["count"] = _graphView.Selection.Count,
+            ["count"] = _viewer.Selection.Count,
         });
     }
 
@@ -353,44 +342,40 @@ public class VizWindow : Form
         ev["timestamp"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         _interactions.Enqueue(ev);
 
-        // Cap the queue at 200 events to prevent unbounded growth
         while (_interactions.Count > 200)
             _interactions.TryDequeue(out _);
     }
 
     private void OnGraphClick(object? sender, MouseEventArgs e)
     {
-        // Selection is handled by GraphView itself now.
-        // Only track interaction events for non-selection clicks (right/middle).
         if (e.Button == MouseButtons.Left) return;
 
-        var ev = new JsonObject
+        EnqueueEvent(new JsonObject
         {
             ["type"] = "click",
             ["button"] = e.Button.ToString().ToLowerInvariant(),
             ["x"] = e.X,
             ["y"] = e.Y,
-        };
-        EnqueueEvent(ev);
+        });
     }
 
     private void OnGraphDoubleClick(object? sender, MouseEventArgs e)
     {
-        var ev = new JsonObject
+        EnqueueEvent(new JsonObject
         {
             ["type"] = "double_click",
             ["x"] = e.X,
             ["y"] = e.Y,
-        };
-        EnqueueEvent(ev);
+        });
     }
 
     private void OnWindowKeyDown(object? sender, KeyEventArgs e)
     {
-        // 'S' key toggles between GDI+ and Skia renderer
-        if (e.KeyCode == Keys.S && e.Modifiers == Keys.None)
+        // 'V' key cycles viewer types
+        if (e.KeyCode == Keys.V && e.Modifiers == Keys.None)
         {
-            SetRenderer(!_useSkia);
+            string next = _viewer.ViewerType == "force" ? "matrix" : "force";
+            SetViewerType(next);
             e.Handled = true;
             return;
         }
@@ -399,14 +384,12 @@ public class VizWindow : Form
         if (e.KeyCode == Keys.L && e.Modifiers == Keys.None)
         {
             _showLabelsItem.Checked = !_showLabelsItem.Checked;
-            // CheckedChanged handler syncs the views
             e.Handled = true;
-            e.SuppressKeyPress = true; // prevent view from double-toggling
+            e.SuppressKeyPress = true;
             return;
         }
 
-        // Navigation keys handled by GraphView.OnKeyDown directly.
-        // Don't double-report those as interaction events.
+        // Navigation keys handled by the viewer's OnKeyDown directly.
         if (e.KeyCode is Keys.PageUp or Keys.PageDown or Keys.Home or Keys.End
             or Keys.Left or Keys.Right or Keys.Up or Keys.Down
             or Keys.Oemplus or Keys.OemMinus or Keys.Add or Keys.Subtract

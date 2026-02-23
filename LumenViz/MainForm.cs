@@ -10,7 +10,7 @@ public partial class MainForm : Form
     // Public accessors for MCP tools
     public Label HelloLabel => _helloLabel;
     public TextBox InputTextBox => _inputTextBox;
-    public GraphView GraphView => _graphView;
+    public SkiaGraphView GraphView => _graphView;
 
     public void SetStatus(string text)
     {

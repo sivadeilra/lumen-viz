@@ -68,7 +68,7 @@ partial class MainForm
         };
 
         // --- Graph visualization ---
-        _graphView = new GraphView
+        _graphView = new SkiaGraphView
         {
             Dock = DockStyle.Fill,
         };
@@ -99,7 +99,7 @@ partial class MainForm
     private ToolStripMenuItem _windowMenu = null!;
     private Label _helloLabel = null!;
     private TextBox _inputTextBox = null!;
-    private GraphView _graphView = null!;
+    private SkiaGraphView _graphView = null!;
     private StatusStrip _statusBar = null!;
     private ToolStripStatusLabel _statusLabel = null!;
 }

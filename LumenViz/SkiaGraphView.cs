@@ -15,8 +15,9 @@ namespace LumenViz;
 /// Renders to an SKBitmap, then blits to the WinForms control surface.
 /// The blit overhead is tracked separately from Skia render time.
 /// </summary>
-public class SkiaGraphView : Control
+public class SkiaGraphView : Control, IGraphViewer
 {
+    public string ViewerType => "force";
     private GraphModel? _graph;
     private PointF _pan = PointF.Empty;
     private float _zoom = 1.0f;
@@ -1060,11 +1061,11 @@ public class SkiaGraphView : Control
 
     // ── Level navigation ────────────────────────────────────────────────
 
-    public void SetLevel(int level)
+    public bool SetLevel(int level)
     {
-        if (_hierarchy == null) return;
-        level = Math.Clamp(level, 0, _hierarchy.LevelCount - 1);
-        if (level == _currentLevel) return;
+        if (_hierarchy == null || level < 0 || level >= _hierarchy.LevelCount)
+            return false;
+        if (level == _currentLevel) return true;
 
         if (Math.Abs(level - _currentLevel) == 1)
         {
@@ -1084,6 +1085,7 @@ public class SkiaGraphView : Control
             Invalidate();
             LevelChanged?.Invoke();
         }
+        return true;
     }
 
     public void GoCoarser()
