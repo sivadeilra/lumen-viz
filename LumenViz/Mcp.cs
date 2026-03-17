@@ -563,6 +563,7 @@ public class McpServer
                 "Set the node ordering mode for the adjacency matrix viewer. " +
                 "Modes: 'community' (grouped by community, default), 'original' (file order), " +
                 "'degree' (sorted by degree), 'bfs' (bandwidth-minimizing BFS from highest-degree node), " +
+                "'spectral' (Fiedler vector ordering, minimizes bandwidth via graph Laplacian eigenvector), " +
                 "or any metric name (e.g. 'pagerank', 'betweenness').",
                 Props(
                     ("window", "string", "Window ID", true),
@@ -583,6 +584,28 @@ public class McpServer
                 Props(
                     ("window", "string", "Window ID", true),
                     ("enabled", "string", "true or false", true))),
+
+            // ── Graph partitioning (Mongoose-style multilevel) ────────
+            ToolDef("graph_bisect",
+                "Compute a balanced bisection of a graph using multilevel coarsening " +
+                "with QP+FM refinement (Algorithm 1003, Davis et al. 2020). " +
+                "Returns partition assignment, edge cut, sizes, and imbalance. " +
+                "Works on the headless graph store or a window's graph.",
+                Props(
+                    ("graph", "string", "Graph name in headless store, or 'window:<id>' to use a window's graph", true),
+                    ("target_split", "string", "Target fraction for partition A (default 0.5 = balanced)", false),
+                    ("tolerance", "string", "Balance tolerance (default 0.25)", false),
+                    ("matching", "string", "Matching strategy: 'random', 'hem', 'hemsr', 'hemsrdeg' (default)", false))),
+
+            ToolDef("graph_partition",
+                "Compute a k-way partition of a graph using recursive multilevel bisection. " +
+                "Returns partition ID (0..k-1) for each vertex, plus summary statistics.",
+                Props(
+                    ("graph", "string", "Graph name in headless store, or 'window:<id>' to use a window's graph", true),
+                    ("k", "string", "Number of partitions (default 2)", false),
+                    ("target_split", "string", "Target fraction for bisection balance (default 0.5)", false),
+                    ("tolerance", "string", "Balance tolerance (default 0.25)", false),
+                    ("matching", "string", "Matching strategy: 'random', 'hem', 'hemsr', 'hemsrdeg' (default)", false))),
         };
     }
 
@@ -1042,6 +1065,10 @@ public class McpServer
                 "set_matrix_ordering" => SetMatrixOrdering(args),
                 "set_color_ramp" => SetColorRamp(args),
                 "set_log_scale" => SetLogScale(args),
+
+                // ── Graph partitioning ────────────────────────────────────
+                "graph_bisect" => GraphBisect(args),
+                "graph_partition" => GraphPartition(args),
 
                 _ => throw new InvalidOperationException(
                     $"Unknown tool: {toolName}"),
@@ -2626,5 +2653,122 @@ public class McpServer
     private static void Log(string message)
     {
         Console.Error.WriteLine($"[mcp] {message}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Graph partitioning tools
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Resolve a graph from either the headless store ("graphname") or
+    /// a window ("window:winId").
+    /// </summary>
+    private GraphModel ResolveGraph(string graphRef)
+    {
+        if (graphRef.StartsWith("window:", StringComparison.OrdinalIgnoreCase))
+        {
+            var winId = graphRef.Substring("window:".Length);
+            if (_windows.TryGetValue(winId, out var win))
+            {
+                var g = InvokeOnUI(() => win.Viewer.GetGraph());
+                if (g != null) return g;
+                throw new ArgumentException($"Window '{winId}' has no graph loaded.");
+            }
+            throw new ArgumentException($"Window not found: {winId}");
+        }
+
+        if (_graphs.TryGetValue(graphRef, out var graph))
+            return graph;
+
+        throw new ArgumentException(
+            $"Graph not found: {graphRef}. Use graph_load or 'window:<id>'.");
+    }
+
+    private static LumenGraph.Partition.PartitionOptions BuildPartitionOptions(JsonNode? args)
+    {
+        var opts = new LumenGraph.Partition.PartitionOptions
+        {
+            TargetSplit = DoubleArg(args, "target_split", 0.5),
+            BalanceTolerance = DoubleArg(args, "tolerance", 0.25),
+        };
+
+        var matchStr = OptArg(args, "matching")?.ToLowerInvariant();
+        if (matchStr != null)
+        {
+            opts.Matching = matchStr switch
+            {
+                "random" => LumenGraph.Partition.MatchingStrategy.Random,
+                "hem" => LumenGraph.Partition.MatchingStrategy.HEM,
+                "hemsr" => LumenGraph.Partition.MatchingStrategy.HEMSR,
+                "hemsrdeg" => LumenGraph.Partition.MatchingStrategy.HEMSRdeg,
+                _ => throw new ArgumentException(
+                    $"Unknown matching strategy: {matchStr}. " +
+                    "Use 'random', 'hem', 'hemsr', or 'hemsrdeg'."),
+            };
+        }
+
+        return opts;
+    }
+
+    private string GraphBisect(JsonNode? args)
+    {
+        var graphRef = Arg(args, "graph");
+        var graph = ResolveGraph(graphRef);
+        var opts = BuildPartitionOptions(args);
+
+        Log($"    Bisecting graph ({graph.NodeCount} nodes, {graph.EdgeCount} edges)");
+
+        var result = LumenGraph.Partition.EdgeSeparator.Bisect(graph, opts);
+
+        return new JsonObject
+        {
+            ["nodes"] = graph.NodeCount,
+            ["edges"] = graph.EdgeCount,
+            ["edge_cut"] = result.EdgeCut,
+            ["size_a"] = result.SizeA,
+            ["size_b"] = result.SizeB,
+            ["imbalance"] = Math.Round(result.Imbalance, 4),
+            ["partition"] = new JsonArray(
+                result.Side.Select(s => (JsonNode)JsonValue.Create(s ? 1 : 0)).ToArray()),
+        }.ToJsonString();
+    }
+
+    private string GraphPartition(JsonNode? args)
+    {
+        var graphRef = Arg(args, "graph");
+        var graph = ResolveGraph(graphRef);
+        var opts = BuildPartitionOptions(args);
+        int k = IntArg(args, "k", 2);
+
+        Log($"    {k}-way partitioning graph ({graph.NodeCount} nodes, {graph.EdgeCount} edges)");
+
+        var partIds = LumenGraph.Partition.EdgeSeparator.RecursiveBisect(graph, k, opts);
+
+        // Compute summary: size of each partition and total edge cut
+        var sizes = new int[k];
+        for (int i = 0; i < partIds.Length; i++)
+            if (partIds[i] < k) sizes[partIds[i]]++;
+
+        double totalCut = 0;
+        for (int e = 0; e < graph.EdgeCount; e++)
+        {
+            if (partIds[graph.EdgeSource[e]] != partIds[graph.EdgeTarget[e]])
+                totalCut += graph.EdgeWeight[e];
+        }
+
+        var sizesArray = new JsonArray(
+            sizes.Select(s => (JsonNode)JsonValue.Create(s)).ToArray());
+        var partArray = new JsonArray(
+            partIds.Select(p => (JsonNode)JsonValue.Create(p)).ToArray());
+
+        return new JsonObject
+        {
+            ["nodes"] = graph.NodeCount,
+            ["edges"] = graph.EdgeCount,
+            ["k"] = k,
+            ["edge_cut"] = totalCut,
+            ["partition_sizes"] = sizesArray,
+            ["partition"] = partArray,
+        }.ToJsonString();
     }
 }

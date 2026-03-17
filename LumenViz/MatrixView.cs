@@ -239,6 +239,14 @@ public class MatrixView : Control, IGraphViewer
                 _ordering = BfsOrdering(_graph);
                 break;
 
+            case "spectral":
+                var spectralOrder = SpectralAnalysis.SpectralOrdering(_graph);
+                if (spectralOrder != null)
+                    _ordering = spectralOrder;
+                else
+                    for (int i = 0; i < n; i++) _ordering[i] = i;
+                break;
+
             default:
                 // Try as a metric name (pagerank, betweenness, etc.)
                 try
