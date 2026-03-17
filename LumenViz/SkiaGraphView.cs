@@ -621,6 +621,8 @@ public class SkiaGraphView : Control, IGraphViewer
 
         // ── HUD ────────────────────────────────────────────────────────
         _phaseSw.Restart();
+        if (ShowLegend)
+            DrawLegendSkia(canvas, w, h);
         DrawHudSkia(canvas, w, h);
         double hudMs = _phaseSw.Elapsed.TotalMilliseconds;
 
@@ -721,6 +723,11 @@ public class SkiaGraphView : Control, IGraphViewer
             counts[ci]++;
         }
 
+        // Viewport bounds with generous padding for ellipse radii
+        int w = Width, h = Height;
+        float viewL = -200f, viewT = -200f;
+        float viewR = w + 200f, viewB = h + 200f;
+
         using var fillPaint = new SKPaint { Style = SKPaintStyle.Fill, IsAntialias = AntiAlias };
         using var strokePaint = new SKPaint
         {
@@ -739,6 +746,10 @@ public class SkiaGraphView : Control, IGraphViewer
             float cy = (minYs[ci] + maxYs[ci]) / 2;
             float rx = (maxXs[ci] - minXs[ci]) / 2 + pad;
             float ry = (maxYs[ci] - minYs[ci]) / 2 + pad;
+
+            // Skip groups entirely outside the viewport
+            if (cx + rx < viewL || cx - rx > viewR || cy + ry < viewT || cy - ry > viewB)
+                continue;
 
             var pc = Palette[coarseGraph.Community[ci] % Palette.Length];
             fillPaint.Color = new SKColor(pc.R, pc.G, pc.B, 25);
@@ -935,6 +946,108 @@ public class SkiaGraphView : Control, IGraphViewer
             string hint = "PgUp/PgDn: levels  |  Home: fit view  |  +/−: zoom  |  Arrows: pan";
             float hintW = hudFont.MeasureText(hint);
             c.DrawText(hint, w - hintW - HintMarginX, HintMarginTop + 13, SKTextAlign.Left, hudFont, paint);
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // ██  COLOR LEGEND OVERLAY  ██
+    // ════════════════════════════════════════════════════════════════════
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool ShowLegend { get; set; } = true;
+
+    private void DrawLegendSkia(SKCanvas c, int w, int h)
+    {
+        if (_graph == null) return;
+
+        var info = NodeColorProvider.GetLegendInfo(_nodeColorMode);
+
+        const int barW = 160, barH = 10, pad = 8;
+        const int legendH = 40; // total height of legend box
+        int boxW = barW + pad * 2 + 80; // extra for labels
+        int boxH = legendH;
+        int x = HudMarginX;
+        int y = h - HudMarginBottom - 18 - boxH; // above HUD text
+
+        // Background
+        using var bgPaint = new SKPaint
+        {
+            Color = new SKColor(16, 16, 24, 160),
+            Style = SKPaintStyle.Fill,
+        };
+        c.DrawRoundRect(new SKRoundRect(new SKRect(x, y, x + boxW, y + boxH), 4), bgPaint);
+
+        using var font = new SKFont(SKTypeface.FromFamilyName("Cascadia Mono"), 10f);
+        using var textPaint = new SKPaint
+        {
+            Color = new SKColor(200, 200, 220, 200),
+            IsAntialias = true,
+        };
+
+        // Mode label
+        c.DrawText(info.Label, x + pad, y + 14, SKTextAlign.Left, font, textPaint);
+
+        if (info.Type == NodeColorProvider.LegendType.Categorical)
+        {
+            // Show top community colors with counts
+            var comm = _graph.Community;
+            int n = _graph.NodeCount;
+            var counts = new Dictionary<int, int>();
+            for (int i = 0; i < n; i++)
+            {
+                int ci = comm[i];
+                counts[ci] = counts.GetValueOrDefault(ci) + 1;
+            }
+
+            var top = counts.OrderByDescending(kv => kv.Value).Take(6).ToArray();
+            float sx = x + pad;
+            float sy = y + 24;
+            using var swatchPaint = new SKPaint { Style = SKPaintStyle.Fill, IsAntialias = true };
+            foreach (var (ci, count) in top)
+            {
+                var pc = Palette[ci % Palette.Length];
+                swatchPaint.Color = new SKColor(pc.R, pc.G, pc.B);
+                c.DrawRect(sx, sy, 8, 8, swatchPaint);
+                c.DrawText(count.ToString(), sx + 12, sy + 8, SKTextAlign.Left, font, textPaint);
+                float tw = font.MeasureText(count.ToString());
+                sx += 12 + tw + 8;
+                if (sx > x + boxW - pad) break;
+            }
+        }
+        else
+        {
+            // Gradient bar
+            int barX = x + pad;
+            int barY = y + 22;
+            using var gradPaint = new SKPaint { Style = SKPaintStyle.Fill };
+            for (int px = 0; px < barW; px++)
+            {
+                float t = px / (float)(barW - 1);
+                Rgba32 sc = info.Type switch
+                {
+                    NodeColorProvider.LegendType.Sequential => NodeColorProvider.SampleSequential(t),
+                    NodeColorProvider.LegendType.Heat => NodeColorProvider.SampleHeat(t),
+                    NodeColorProvider.LegendType.Diverging => NodeColorProvider.SampleDiverging(t),
+                    _ => NodeColorProvider.SampleSequential(t),
+                };
+                gradPaint.Color = new SKColor(sc.R, sc.G, sc.B);
+                c.DrawRect(barX + px, barY, 1, barH, gradPaint);
+            }
+
+            // Border
+            using var borderPaint = new SKPaint
+            {
+                Color = new SKColor(100, 110, 140, 100),
+                StrokeWidth = 1,
+                Style = SKPaintStyle.Stroke,
+            };
+            c.DrawRect(barX, barY, barW, barH, borderPaint);
+
+            // Low/High labels
+            if (info.LowLabel != null)
+                c.DrawText(info.LowLabel, barX, barY + barH + 12, SKTextAlign.Left, font, textPaint);
+            if (info.HighLabel != null)
+                c.DrawText(info.HighLabel, barX + barW, barY + barH + 12, SKTextAlign.Right, font, textPaint);
         }
     }
 
@@ -1479,6 +1592,7 @@ public class SkiaGraphView : Control, IGraphViewer
                 ["show_off_screen"] = ShowOffScreenIndicators,
                 ["show_selection_glow"] = ShowSelectionGlow,
                 ["show_labels"] = ShowLabels,
+                ["show_legend"] = ShowLegend,
                 ["anti_alias"] = AntiAlias,
                 ["lod_mode"] = LodMode,
             },

@@ -931,4 +931,45 @@ public sealed class NodeColorProvider
         float frac = scaled - lo;
         return Rgba32.Lerp(HeatStops[lo], HeatStops[lo + 1], frac);
     }
+
+    /// <summary>
+    /// Sample the diverging (blue→white→red) gradient at position t in [0,1].
+    /// </summary>
+    public static Rgba32 SampleDiverging(float t)
+    {
+        t = Math.Clamp(t, 0f, 1f);
+        if (t < 0.5f)
+            return Rgba32.Lerp(DivBlue, DivWhite, t * 2f);
+        else
+            return Rgba32.Lerp(DivWhite, DivRed, (t - 0.5f) * 2f);
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Legend metadata
+    // ════════════════════════════════════════════════════════════════════
+
+    /// <summary>Describes how to render a color legend for a given mode.</summary>
+    public enum LegendType { Categorical, Sequential, Heat, Diverging }
+
+    /// <summary>Legend metadata for a node color mode.</summary>
+    public sealed record LegendInfo(
+        LegendType Type,
+        string Label,
+        string? LowLabel = null,
+        string? HighLabel = null);
+
+    /// <summary>
+    /// Return legend metadata for the given node color mode.
+    /// </summary>
+    public static LegendInfo GetLegendInfo(string mode) => mode switch
+    {
+        "community"    => new(LegendType.Categorical, "Community"),
+        "degree"       => new(LegendType.Sequential, "Degree", "Low", "High"),
+        "in_out_ratio" => new(LegendType.Diverging, "In/Out Ratio", "Out", "In"),
+        "betweenness"  => new(LegendType.Heat, "Betweenness", "Low", "High"),
+        "pagerank"     => new(LegendType.Heat, "PageRank", "Low", "High"),
+        "clustering"   => new(LegendType.Sequential, "Clustering", "0", "1"),
+        "kcore"        => new(LegendType.Sequential, "K-Core", "Low", "High"),
+        _ => new(LegendType.Categorical, mode),
+    };
 }

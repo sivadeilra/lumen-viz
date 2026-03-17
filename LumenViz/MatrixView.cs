@@ -767,12 +767,11 @@ public class MatrixView : Control, IGraphViewer
         string toLabel = toNode < _graph.Labels.Length ? _graph.Labels[toNode] : toNode.ToString();
         string tipText = $"Row: {fromLabel} (deg {_graph.Degree[fromNode]})  Col: {toLabel} (deg {_graph.Degree[toNode]})";
 
+        using var tipFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 12f);
         using var tipPaint = new SKPaint
         {
             Color = SKColors.White,
-            TextSize = 12,
             IsAntialias = true,
-            Typeface = SKTypeface.FromFamilyName("Segoe UI"),
         };
         using var tipBg = new SKPaint
         {
@@ -780,12 +779,12 @@ public class MatrixView : Control, IGraphViewer
             Style = SKPaintStyle.Fill,
         };
 
-        float tw = tipPaint.MeasureText(tipText);
+        float tw = tipFont.MeasureText(tipText);
         float tx = Math.Min(mx + 12, w - tw - 8);
         float ty = Math.Max(my - 8, 18);
 
         canvas.DrawRect(tx - 4, ty - 14, tw + 8, 18, tipBg);
-        canvas.DrawText(tipText, tx, ty, tipPaint);
+        canvas.DrawText(tipText, tx, ty, SKTextAlign.Left, tipFont, tipPaint);
     }
 
     private const int MinimapSize = 140;
@@ -875,12 +874,11 @@ public class MatrixView : Control, IGraphViewer
         }
         status += $"  |  {_avgRenderMs:F1}ms + {_avgBlitMs:F1}ms blit";
 
+        using var statusFont = new SKFont(SKTypeface.FromFamilyName("Segoe UI"), 12f);
         using var paint = new SKPaint
         {
             Color = new SKColor(200, 200, 200, 200),
-            TextSize = 12,
             IsAntialias = true,
-            Typeface = SKTypeface.FromFamilyName("Segoe UI"),
         };
         using var bgPaint = new SKPaint
         {
@@ -888,9 +886,9 @@ public class MatrixView : Control, IGraphViewer
             Style = SKPaintStyle.Fill,
         };
 
-        float tw = paint.MeasureText(status);
+        float tw = statusFont.MeasureText(status);
         canvas.DrawRect(6, h - 22, tw + 8, 18, bgPaint);
-        canvas.DrawText(status, 10, h - 8, paint);
+        canvas.DrawText(status, 10, h - 8, SKTextAlign.Left, statusFont, paint);
     }
 
     private void UpdateEma(ref double avg, double sample)

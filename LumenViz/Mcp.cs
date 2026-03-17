@@ -1517,6 +1517,7 @@ public class McpServer
                             case "show_parent_highlight": skia.ShowParentHighlight = boolVal; break;
                             case "show_off_screen_indicators": skia.ShowOffScreenIndicators = boolVal; break;
                             case "show_selection_glow": skia.ShowSelectionGlow = boolVal; break;
+                            case "show_legend": skia.ShowLegend = boolVal; break;
                             case "lod_mode":
                                 if (value is "auto" or "low" or "high")
                                     skia.LodMode = value;
@@ -2346,6 +2347,7 @@ public class McpServer
                             case "show_parent_highlight": skia.ShowParentHighlight = boolVal; break;
                             case "show_off_screen_indicators": skia.ShowOffScreenIndicators = boolVal; break;
                             case "show_selection_glow": skia.ShowSelectionGlow = boolVal; break;
+                            case "show_legend": skia.ShowLegend = boolVal; break;
                             case "lod_mode":
                                 if (value is "auto" or "low" or "high")
                                     skia.LodMode = value;

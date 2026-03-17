@@ -16,7 +16,7 @@ namespace LumenViz;
 public class VizWindow : Form
 {
     private readonly string _windowId;
-    private IGraphViewer _viewer;
+    private IGraphViewer _viewer = null!;
     private readonly StatusStrip _statusBar;
     private readonly ToolStripStatusLabel _statusLabel;
     private readonly MenuStrip _menuStrip;
