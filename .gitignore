@@ -4,3 +4,9 @@ obj/
 .vs/
 *.tar.gz
 papers/
+
+# Downloaded SNAP benchmark graphs (large files)
+data/email-enron/
+data/ca-hepth/
+data/loc-brightkite/
+data/oregon/

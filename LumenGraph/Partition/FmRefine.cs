@@ -91,46 +91,79 @@ public static class FmRefine
             // Recompute gains at start of each pass
             ComputeGains(graph, partition, gain);
 
+            // Build boundary set: vertices with at least one cross-edge
+            var boundary = new HashSet<int>();
+            for (int i = 0; i < n; i++)
+            {
+                bool side = partition.Side[i];
+                int start = graph.AdjOffset[i];
+                int end = graph.AdjOffset[i + 1];
+                for (int ai = start; ai < end; ai++)
+                {
+                    if (partition.Side[graph.AdjList[ai]] != side)
+                    {
+                        boundary.Add(i);
+                        break;
+                    }
+                }
+            }
+
+            int nonImprovingMoves = 0;
+            const int maxNonImproving = 50;
+
             for (int step = 0; step < n; step++)
             {
-                // Find highest-gain unlocked vertex that maintains balance
+                // Find highest-gain unlocked boundary vertex that maintains
+                // balance. If currently infeasible, allow corrective moves.
                 int bestV = -1;
                 double bestGain = double.NegativeInfinity;
 
-                for (int i = 0; i < n; i++)
+                bool currentlyFeasible = weightB >= lo && weightB <= hi;
+
+                foreach (int i in boundary)
                 {
                     if (locked[i]) continue;
                     if (gain[i] <= bestGain) continue;
 
-                    // Check balance constraint if we move i
                     double newWeightB = partition.Side[i]
-                        ? weightB - vertexWeight[i]  // moving from B to A
-                        : weightB + vertexWeight[i];  // moving from A to B
+                        ? weightB - vertexWeight[i]
+                        : weightB + vertexWeight[i];
 
                     if (newWeightB >= lo && newWeightB <= hi)
                     {
                         bestGain = gain[i];
                         bestV = i;
                     }
+                    else if (!currentlyFeasible)
+                    {
+                        double oldDist = weightB < lo ? lo - weightB
+                                       : weightB > hi ? weightB - hi : 0;
+                        double newDist = newWeightB < lo ? lo - newWeightB
+                                       : newWeightB > hi ? newWeightB - hi : 0;
+                        if (newDist < oldDist)
+                        {
+                            bestGain = gain[i];
+                            bestV = i;
+                        }
+                    }
                 }
 
-                if (bestV < 0) break; // no feasible move
+                if (bestV < 0) break;
 
                 // Execute the move
                 bool newSide = !partition.Side[bestV];
                 partition.Side[bestV] = newSide;
                 locked[bestV] = true;
+                boundary.Remove(bestV);
 
-                // Update weightB
-                if (newSide) // moved to B
-                    weightB += vertexWeight[bestV];
-                else // moved to A
-                    weightB -= vertexWeight[bestV];
+                if (newSide) weightB += vertexWeight[bestV];
+                else weightB -= vertexWeight[bestV];
 
-                // Update gains of neighbors
-                UpdateGains(graph, partition, gain, bestV);
+                // Update gains and boundary for neighbors of bestV
+                UpdateGainsAndBoundary(graph, partition, gain, bestV,
+                                       boundary, locked);
 
-                double cutDelta = -bestGain; // negative gain = cut increases
+                double cutDelta = -bestGain;
                 runningCutDelta += cutDelta;
 
                 moveLog[moveCount] = (bestV, newSide, cutDelta);
@@ -140,6 +173,13 @@ public static class FmRefine
                 {
                     bestCutDelta = runningCutDelta;
                     bestMoveCount = moveCount;
+                    nonImprovingMoves = 0;
+                }
+                else
+                {
+                    nonImprovingMoves++;
+                    if (nonImprovingMoves >= maxNonImproving)
+                        break;
                 }
             }
 
@@ -197,15 +237,17 @@ public static class FmRefine
     }
 
     /// <summary>
-    /// After moving vertex v to its new side, update gains of its neighbors.
+    /// After moving vertex v to its new side, update gains of its neighbors
+    /// and maintain the boundary set.
     /// When v moves from side S to side !S:
     /// - For neighbor j on the same original side S: j lost an internal edge
     ///   and gained an external edge → gain[j] += 2·w(v,j)
     /// - For neighbor j on the other side !S: j gained an internal edge
     ///   and lost an external edge → gain[j] -= 2·w(v,j)
     /// </summary>
-    private static void UpdateGains(
-        GraphModel graph, PartitionResult partition, double[] gain, int v)
+    private static void UpdateGainsAndBoundary(
+        GraphModel graph, PartitionResult partition, double[] gain, int v,
+        HashSet<int> boundary, bool[] locked)
     {
         bool newSideV = partition.Side[v];
 
@@ -218,13 +260,30 @@ public static class FmRefine
 
             if (partition.Side[j] == newSideV)
             {
-                // j is now on the same side as v → v's move made (v,j) internal
                 gain[j] -= 2 * w;
             }
             else
             {
-                // j is on the opposite side → v's move made (v,j) external
                 gain[j] += 2 * w;
+            }
+
+            // Update boundary: j is boundary if it has any cross-edge
+            if (!locked[j])
+            {
+                bool isBound = false;
+                bool sideJ = partition.Side[j];
+                int js = graph.AdjOffset[j];
+                int je = graph.AdjOffset[j + 1];
+                for (int bi = js; bi < je; bi++)
+                {
+                    if (partition.Side[graph.AdjList[bi]] != sideJ)
+                    {
+                        isBound = true;
+                        break;
+                    }
+                }
+                if (isBound) boundary.Add(j);
+                else boundary.Remove(j);
             }
         }
     }

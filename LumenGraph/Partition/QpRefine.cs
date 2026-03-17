@@ -162,7 +162,64 @@ public static class QpRefine
             partition.Side[k] = x[k] > 0.5;
         }
 
+        // Repair balance after rounding. The continuous relaxation
+        // respects constraints, but rounding may violate them. Move
+        // vertices with x closest to 0.5 (most ambiguous) from the
+        // oversized side until the constraint is satisfied.
+        RepairBalance(graph, partition, vertexWeight, x, lo, hi);
+
         partition.Recompute(graph);
+    }
+
+    /// <summary>
+    /// After rounding x to discrete, check if the balance constraint
+    /// is violated. If so, move the borderline vertices (x closest to 0.5)
+    /// from the oversized side until weight in B is within [lo, hi].
+    /// </summary>
+    private static void RepairBalance(
+        GraphModel graph, PartitionResult partition,
+        double[] vertexWeight, double[] x, double lo, double hi)
+    {
+        int n = graph.NodeCount;
+        double weightB = 0;
+        for (int i = 0; i < n; i++)
+            if (partition.Side[i]) weightB += vertexWeight[i];
+
+        if (weightB >= lo && weightB <= hi) return; // already balanced
+
+        if (weightB > hi)
+        {
+            // B is too large — move B vertices closest to 0.5 to A.
+            // Sort B vertices by x value ascending (closest to 0.5 first).
+            var candidates = new List<(int idx, double xVal)>();
+            for (int i = 0; i < n; i++)
+                if (partition.Side[i])
+                    candidates.Add((i, x[i]));
+            candidates.Sort((a, b) => a.xVal.CompareTo(b.xVal));
+
+            foreach (var (idx, _) in candidates)
+            {
+                if (weightB <= hi) break;
+                partition.Side[idx] = false;
+                weightB -= vertexWeight[idx];
+            }
+        }
+        else // weightB < lo
+        {
+            // B is too small — move A vertices closest to 0.5 to B.
+            var candidates = new List<(int idx, double xVal)>();
+            for (int i = 0; i < n; i++)
+                if (!partition.Side[i])
+                    candidates.Add((i, x[i]));
+            candidates.Sort((a, b) => b.xVal.CompareTo(a.xVal)); // descending
+
+            foreach (var (idx, _) in candidates)
+            {
+                if (weightB >= lo) break;
+                partition.Side[idx] = true;
+                weightB += vertexWeight[idx];
+            }
+        }
     }
 
     /// <summary>
