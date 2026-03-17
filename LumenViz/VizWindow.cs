@@ -95,7 +95,7 @@ public class VizWindow : Form
         // Viewer type sub-menu
         viewMenu.DropDownItems.Add(new ToolStripSeparator());
         var viewerTypeMenu = new ToolStripMenuItem("Viewer &Type");
-        foreach (var (label, type) in new[] { ("Force Layout", "force"), ("Adjacency Matrix", "matrix"), ("Matrix (GPU)", "matrix_gpu") })
+        foreach (var (label, type) in new[] { ("Force Layout", "force"), ("Adjacency Matrix", "matrix") })
         {
             var item = new ToolStripMenuItem(label) { Tag = type };
             item.Click += (_, _) => SetViewerType(type);
@@ -247,8 +247,7 @@ public class VizWindow : Form
     {
         return viewerType switch
         {
-            "matrix" => new MatrixView(),
-            "matrix_gpu" => new D3D11MatrixView(),
+            "matrix" => new D3D11MatrixView(),
             _ => new SkiaGraphView(),
         };
     }

@@ -19,7 +19,7 @@ public class MatrixView : Control, IGraphViewer
     public string ViewerType => "matrix";
 
     // ── Graph data ──────────────────────────────────────────────────────
-    private GraphModel? _graph;
+    protected GraphModel? _graph;
     private CoarseningHierarchy? _hierarchy;
     private int _currentLevel;
 
@@ -32,15 +32,15 @@ public class MatrixView : Control, IGraphViewer
     /// <summary>
     /// Inverse: maps nodeIndex → visual position. Used for highlight lookup.
     /// </summary>
-    private int[] _inverseOrder = Array.Empty<int>();
+    protected int[] _inverseOrder = Array.Empty<int>();
 
     private string _orderingMode = "community";
 
     // ── Viewport (zoom/pan in matrix space) ─────────────────────────────
     /// <summary>Top-left corner of the visible region in matrix coords [0..N).</summary>
-    private double _viewX, _viewY;
+    protected double _viewX, _viewY;
     /// <summary>Size of the visible region in matrix coords.</summary>
-    private double _viewW, _viewH;
+    protected double _viewW, _viewH;
 
     // ── Mouse state ─────────────────────────────────────────────────────
     private Point _lastMouse;
@@ -138,7 +138,7 @@ public class MatrixView : Control, IGraphViewer
     // Graph data management
     // ══════════════════════════════════════════════════════════════════════
 
-    public void SetGraph(GraphModel graph)
+    public virtual void SetGraph(GraphModel graph)
     {
         _graph = graph;
         _hierarchy = null;
@@ -146,10 +146,11 @@ public class MatrixView : Control, IGraphViewer
         _selection.Clear();
         ComputeOrdering();
         AutoFit();
+        OnGraphDataChanged();
         Invalidate();
     }
 
-    public void SetGraphWithHierarchy(GraphModel graph, CoarseningHierarchy hierarchy)
+    public virtual void SetGraphWithHierarchy(GraphModel graph, CoarseningHierarchy hierarchy)
     {
         _graph = graph;
         _hierarchy = hierarchy;
@@ -157,6 +158,7 @@ public class MatrixView : Control, IGraphViewer
         _selection.Clear();
         ComputeOrdering();
         AutoFit();
+        OnGraphDataChanged();
         Invalidate();
     }
 
@@ -1236,10 +1238,12 @@ public class MatrixView : Control, IGraphViewer
         _selection.Clear();
         ComputeOrdering();
         AutoFit();
+        OnGraphDataChanged();
         Invalidate();
         LevelChanged?.Invoke();
         return true;
     }
+    protected virtual void OnGraphDataChanged() { }
 
     public void GoCoarser()
     {
@@ -1261,7 +1265,7 @@ public class MatrixView : Control, IGraphViewer
     // IGraphViewer — Performance
     // ══════════════════════════════════════════════════════════════════════
 
-    public Dictionary<string, object> GetRenderStats()
+    public virtual Dictionary<string, object> GetRenderStats()
     {
         return new Dictionary<string, object>
         {
