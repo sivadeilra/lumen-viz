@@ -21,6 +21,11 @@ public class VizWindow : Form
     private readonly ToolStripStatusLabel _statusLabel;
     private readonly MenuStrip _menuStrip;
     private readonly ToolStripMenuItem _showLabelsItem;
+    private readonly ToolStrip _gammaToolbar;
+    private readonly ToolStripLabel _gammaLabel;
+    private readonly TrackBar _gammaSlider;
+    private readonly ToolStripLabel _floorLabel;
+    private readonly TrackBar _floorSlider;
 
     /// <summary>
     /// Thread-safe queue of user interaction events (node clicks, key
@@ -90,7 +95,7 @@ public class VizWindow : Form
         // Viewer type sub-menu
         viewMenu.DropDownItems.Add(new ToolStripSeparator());
         var viewerTypeMenu = new ToolStripMenuItem("Viewer &Type");
-        foreach (var (label, type) in new[] { ("Force Layout", "force"), ("Adjacency Matrix", "matrix") })
+        foreach (var (label, type) in new[] { ("Force Layout", "force"), ("Adjacency Matrix", "matrix"), ("Matrix (GPU)", "matrix_gpu") })
         {
             var item = new ToolStripMenuItem(label) { Tag = type };
             item.Click += (_, _) => SetViewerType(type);
@@ -151,6 +156,59 @@ public class VizWindow : Form
 
         _menuStrip.Items.Add(colorMenu);
 
+        // ── Gamma / density floor toolbar ───────────────────────────────
+        _gammaToolbar = new ToolStrip
+        {
+            GripStyle = ToolStripGripStyle.Hidden,
+            BackColor = System.Drawing.Color.FromArgb(30, 30, 30),
+            ForeColor = System.Drawing.Color.White,
+            Renderer = new DarkToolStripRenderer(),
+            Visible = false, // shown only in matrix view
+        };
+
+        _gammaToolbar.Items.Add(new ToolStripLabel("γ") { ForeColor = System.Drawing.Color.LightGray });
+        // Gamma preset buttons
+        foreach (var (label, val) in new[] { ("0.3", 0.3), ("0.5", 0.5), ("0.7", 0.7), ("1.0", 1.0), ("1.5", 1.5), ("2.0", 2.0) })
+        {
+            var btn = new ToolStripButton(label) { Tag = val, ForeColor = System.Drawing.Color.White };
+            btn.Click += (_, _) =>
+            {
+                double g = (double)btn.Tag;
+                _gammaSlider.Value = (int)(g * 100);
+                ApplyGamma(g);
+            };
+            _gammaToolbar.Items.Add(btn);
+        }
+
+        _gammaSlider = new TrackBar
+        {
+            Minimum = 10, Maximum = 500, Value = 50, // 0.10 .. 5.00, default 0.50
+            TickFrequency = 50, SmallChange = 5, LargeChange = 25,
+            Width = 160, Height = 28,
+            AutoSize = false,
+            BackColor = System.Drawing.Color.FromArgb(30, 30, 30),
+        };
+        _gammaSlider.ValueChanged += (_, _) => ApplyGamma(_gammaSlider.Value / 100.0);
+        _gammaLabel = new ToolStripLabel("0.50") { ForeColor = System.Drawing.Color.Cyan };
+        _gammaToolbar.Items.Add(new ToolStripControlHost(_gammaSlider));
+        _gammaToolbar.Items.Add(_gammaLabel);
+
+        _gammaToolbar.Items.Add(new ToolStripSeparator());
+        _gammaToolbar.Items.Add(new ToolStripLabel("Floor") { ForeColor = System.Drawing.Color.LightGray });
+
+        _floorSlider = new TrackBar
+        {
+            Minimum = 0, Maximum = 90, Value = 30, // 0.00 .. 0.90, default 0.30
+            TickFrequency = 10, SmallChange = 5, LargeChange = 10,
+            Width = 120, Height = 28,
+            AutoSize = false,
+            BackColor = System.Drawing.Color.FromArgb(30, 30, 30),
+        };
+        _floorSlider.ValueChanged += (_, _) => ApplyFloor(_floorSlider.Value / 100.0);
+        _floorLabel = new ToolStripLabel("0.30") { ForeColor = System.Drawing.Color.Cyan };
+        _gammaToolbar.Items.Add(new ToolStripControlHost(_floorSlider));
+        _gammaToolbar.Items.Add(_floorLabel);
+
         // ── Create the initial viewer ───────────────────────────────────
         _viewer = CreateViewer(viewerType);
         var ctrl = (Control)_viewer;
@@ -167,9 +225,11 @@ public class VizWindow : Form
         ClientSize = new Size(width, height);
         MainMenuStrip = _menuStrip;
         Controls.Add(ctrl);
+        Controls.Add(_gammaToolbar);
         Controls.Add(_menuStrip);
         Controls.Add(_statusBar);
         StartPosition = FormStartPosition.CenterScreen;
+        UpdateGammaToolbarVisibility();
 
         // ── Wire up interaction tracking ────────────────────────────────
         KeyPreview = true;
@@ -188,6 +248,7 @@ public class VizWindow : Form
         return viewerType switch
         {
             "matrix" => new MatrixView(),
+            "matrix_gpu" => new D3D11MatrixView(),
             _ => new SkiaGraphView(),
         };
     }
@@ -229,6 +290,7 @@ public class VizWindow : Form
 
         newCtrl.Focus();
         UpdateStatusFromGraph();
+        UpdateGammaToolbarVisibility();
     }
 
     private void WireViewerEvents()
@@ -247,6 +309,36 @@ public class VizWindow : Form
         var ctrl = (Control)_viewer;
         ctrl.MouseClick -= OnGraphClick;
         ctrl.MouseDoubleClick -= OnGraphDoubleClick;
+    }
+
+    private void ApplyGamma(double gamma)
+    {
+        if (_viewer is MatrixView mv)
+        {
+            mv.Gamma = gamma;
+            _gammaLabel.Text = gamma.ToString("F2");
+        }
+    }
+
+    private void ApplyFloor(double floor)
+    {
+        if (_viewer is MatrixView mv)
+        {
+            mv.DensityFloor = floor;
+            _floorLabel.Text = floor.ToString("F2");
+        }
+    }
+
+    private void UpdateGammaToolbarVisibility()
+    {
+        _gammaToolbar.Visible = _viewer is MatrixView;
+        if (_viewer is MatrixView mv)
+        {
+            _gammaSlider.Value = Math.Clamp((int)(mv.Gamma * 100), _gammaSlider.Minimum, _gammaSlider.Maximum);
+            _gammaLabel.Text = mv.Gamma.ToString("F2");
+            _floorSlider.Value = Math.Clamp((int)(mv.DensityFloor * 100), _floorSlider.Minimum, _floorSlider.Maximum);
+            _floorLabel.Text = mv.DensityFloor.ToString("F2");
+        }
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -422,5 +514,34 @@ public class VizWindow : Form
             ["type"] = "window_closed",
         });
         WindowClosed?.Invoke(_windowId);
+    }
+}
+
+/// <summary>Dark theme renderer for the gamma toolbar.</summary>
+internal sealed class DarkToolStripRenderer : ToolStripProfessionalRenderer
+{
+    protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
+    {
+        using var brush = new SolidBrush(System.Drawing.Color.FromArgb(30, 30, 30));
+        e.Graphics.FillRectangle(brush, e.AffectedBounds);
+    }
+
+    protected override void OnRenderButtonBackground(ToolStripItemRenderEventArgs e)
+    {
+        if (e.Item.Selected || e.Item.Pressed)
+        {
+            var color = e.Item.Pressed
+                ? System.Drawing.Color.FromArgb(60, 60, 60)
+                : System.Drawing.Color.FromArgb(50, 50, 50);
+            using var brush = new SolidBrush(color);
+            e.Graphics.FillRectangle(brush, new Rectangle(Point.Empty, e.Item.Size));
+        }
+    }
+
+    protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
+    {
+        int y = e.Item.Height / 2;
+        using var pen = new Pen(System.Drawing.Color.FromArgb(60, 60, 60));
+        e.Graphics.DrawLine(pen, 4, y, e.Item.Width - 4, y);
     }
 }

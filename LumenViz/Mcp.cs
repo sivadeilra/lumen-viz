@@ -585,6 +585,24 @@ public class McpServer
                     ("window", "string", "Window ID", true),
                     ("enabled", "string", "true or false", true))),
 
+            ToolDef("set_gamma",
+                "Set the gamma exponent for the adjacency matrix density mapping. " +
+                "Values <1 lift midtones (better visibility of sparse regions), " +
+                ">1 compresses them. Default 0.5. Range 0.1–5.0. " +
+                "Common presets: 0.3 (very lifted), 0.5 (default), 0.7, 1.0 (linear), 1.5, 2.0 (compressed).",
+                Props(
+                    ("window", "string", "Window ID", true),
+                    ("gamma", "string", "Gamma value (0.1–5.0)", true))),
+
+            ToolDef("set_density_floor",
+                "Set the density floor for the adjacency matrix. " +
+                "Any nonzero density jumps to at least this fraction of the color ramp, " +
+                "making even single-edge pixels clearly visible. " +
+                "Default 0.3 (LUT index ~77). Range 0.0–0.9.",
+                Props(
+                    ("window", "string", "Window ID", true),
+                    ("floor", "string", "Floor value (0.0–0.9)", true))),
+
             // ── Graph partitioning (Mongoose-style multilevel) ────────
             ToolDef("graph_bisect",
                 "Compute a balanced bisection of a graph using multilevel coarsening " +
@@ -1065,6 +1083,8 @@ public class McpServer
                 "set_matrix_ordering" => SetMatrixOrdering(args),
                 "set_color_ramp" => SetColorRamp(args),
                 "set_log_scale" => SetLogScale(args),
+                "set_gamma" => SetGamma(args),
+                "set_density_floor" => SetDensityFloor(args),
 
                 // ── Graph partitioning ────────────────────────────────────
                 "graph_bisect" => GraphBisect(args),
@@ -2057,6 +2077,34 @@ public class McpServer
                 return "Window is not in matrix view mode. Use set_viewer_type first.";
             mv.LogScale = enabled;
             return $"Log scale {(enabled ? "enabled" : "disabled")}";
+        });
+    }
+
+    private string SetGamma(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        if (!double.TryParse(Arg(args, "gamma"), out double gamma))
+            return "Invalid gamma value. Must be a number (0.1–5.0).";
+        return InvokeOnUI(() =>
+        {
+            if (win.Viewer is not MatrixView mv)
+                return "Window is not in matrix view mode. Use set_viewer_type first.";
+            mv.Gamma = gamma;
+            return $"Set gamma to {mv.Gamma:F2}";
+        });
+    }
+
+    private string SetDensityFloor(JsonNode? args)
+    {
+        var win = GetWindow(args);
+        if (!double.TryParse(Arg(args, "floor"), out double floor))
+            return "Invalid floor value. Must be a number (0.0–0.9).";
+        return InvokeOnUI(() =>
+        {
+            if (win.Viewer is not MatrixView mv)
+                return "Window is not in matrix view mode. Use set_viewer_type first.";
+            mv.DensityFloor = floor;
+            return $"Set density floor to {mv.DensityFloor:F2}";
         });
     }
 

@@ -60,14 +60,18 @@ public class MatrixView : Control, IGraphViewer
     public event Action? LevelChanged;
 
     // ── Density grid (flat array, row-major) ────────────────────────────
-    private int[] _density = Array.Empty<int>();
-    private int _densityW, _densityH;
-    private int _maxDensity;
+    protected int[] _density = Array.Empty<int>();
+    protected int _densityW, _densityH;
+    protected int _maxDensity;
 
     // ── Color ramp LUT (256 entries) ────────────────────────────────────
-    private uint[] _colorLut = new uint[256];
+    protected uint[] _colorLut = new uint[256];
     private string _colorRamp = "thermal";
     private bool _logScale = true;
+
+    // ── Gamma / density floor (perceptual mapping) ──────────────────────
+    private double _gamma = 0.5;
+    private double _densityFloor = 0.3;
 
     // ── SkiaSharp surface ───────────────────────────────────────────────
     private SKBitmap? _skBitmap;
@@ -109,10 +113,10 @@ public class MatrixView : Control, IGraphViewer
     }
 
     // ── Performance instrumentation ─────────────────────────────────────
-    private readonly Stopwatch _sw = new();
-    private double _avgRenderMs, _avgBlitMs;
-    private int _frameCount;
-    private const double PerfAlpha = 0.1;
+    protected readonly Stopwatch _sw = new();
+    protected double _avgRenderMs, _avgBlitMs;
+    protected int _frameCount;
+    protected const double PerfAlpha = 0.1;
 
     // ══════════════════════════════════════════════════════════════════════
     // Constructor
@@ -187,6 +191,22 @@ public class MatrixView : Control, IGraphViewer
     {
         get => _logScale;
         set { _logScale = value; Invalidate(); }
+    }
+
+    /// <summary>Gamma exponent for density mapping. Values &lt;1 lift midtones (default 0.5).</summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public double Gamma
+    {
+        get => _gamma;
+        set { _gamma = Math.Clamp(value, 0.1, 5.0); Invalidate(); }
+    }
+
+    /// <summary>Floor value for nonzero densities (0..1). Default 0.3 = LUT index ~77.</summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public double DensityFloor
+    {
+        get => _densityFloor;
+        set { _densityFloor = Math.Clamp(value, 0.0, 0.9); Invalidate(); }
     }
 
     /// <summary>Color ramp name: "thermal", "viridis", "grayscale", "cyan".</summary>
@@ -349,16 +369,16 @@ public class MatrixView : Control, IGraphViewer
         return (col, row);
     }
 
-    private int DataWidth => Math.Max(1, Width - AxisMargin);
-    private int DataHeight => Math.Max(1, Height - AxisMargin);
+    protected int DataWidth => Math.Max(1, Width - AxisMargin);
+    protected int DataHeight => Math.Max(1, Height - AxisMargin);
 
     // ══════════════════════════════════════════════════════════════════════
     // Density grid computation
     // ══════════════════════════════════════════════════════════════════════
 
-    private bool _densityDirty = true;
+    protected bool _densityDirty = true;
 
-    private void InvalidateDensity()
+    protected void InvalidateDensity()
     {
         _densityDirty = true;
     }
@@ -368,7 +388,7 @@ public class MatrixView : Control, IGraphViewer
     /// into a pixelW × pixelH grid based on the current viewport and ordering.
     /// Uses flat int[] with manual row-major striding.
     /// </summary>
-    private void RecomputeDensity()
+    protected void RecomputeDensity()
     {
         if (_graph == null) return;
         int dw = DataWidth;
@@ -433,7 +453,7 @@ public class MatrixView : Control, IGraphViewer
     // Color ramp
     // ══════════════════════════════════════════════════════════════════════
 
-    private void BuildColorLut()
+    protected void BuildColorLut()
     {
         for (int i = 0; i < 256; i++)
         {
@@ -501,7 +521,10 @@ public class MatrixView : Control, IGraphViewer
         else
             t = (double)density / _maxDensity;
 
-        int idx = Math.Clamp((int)(t * 255), 0, 255);
+        // Gamma curve + floor lift: any nonzero density jumps to _densityFloor,
+        // then scales along a power curve to 1.0
+        double mapped = _densityFloor + (1.0 - _densityFloor) * Math.Pow(t, _gamma);
+        int idx = Math.Clamp((int)(mapped * 255), 0, 255);
         return _colorLut[idx];
     }
 
@@ -899,7 +922,7 @@ public class MatrixView : Control, IGraphViewer
         canvas.DrawText(status, 10, h - 8, SKTextAlign.Left, statusFont, paint);
     }
 
-    private void UpdateEma(ref double avg, double sample)
+    protected void UpdateEma(ref double avg, double sample)
     {
         if (_frameCount <= 1) avg = sample;
         else avg = avg * (1 - PerfAlpha) + sample * PerfAlpha;
